@@ -38,6 +38,10 @@ let package = Package(
             targets: ["CambiumOwnedTraversal"]
         ),
         .library(
+            name: "CambiumSerialization",
+            targets: ["CambiumSerialization"]
+        ),
+        .library(
             name: "CambiumTesting",
             targets: ["CambiumTesting"]
         ),
@@ -52,6 +56,7 @@ let package = Package(
                 "CambiumAnalysis",
                 "CambiumASTSupport",
                 "CambiumOwnedTraversal",
+                "CambiumSerialization",
             ]
         ),
         .target(
@@ -78,6 +83,13 @@ let package = Package(
             dependencies: ["CambiumCore"]
         ),
         .target(
+            name: "CambiumSerialization",
+            dependencies: [
+                "CambiumCore",
+                "CambiumBuilder",
+            ]
+        ),
+        .target(
             name: "CambiumTesting",
             dependencies: ["CambiumCore"]
         ),
@@ -90,6 +102,7 @@ let package = Package(
                 "CambiumAnalysis",
                 "CambiumASTSupport",
                 "CambiumOwnedTraversal",
+                "CambiumSerialization",
             ]
         ),
     ],

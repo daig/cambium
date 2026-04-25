@@ -4,6 +4,7 @@ import CambiumBuilder
 import CambiumCore
 import CambiumIncremental
 import CambiumOwnedTraversal
+import CambiumSerialization
 import Testing
 
 private enum TestKind: UInt32, Sendable {
@@ -22,6 +23,8 @@ private enum TestLanguage: SyntaxLanguage {
     static let rootKind: TestKind = .root
     static let missingKind: TestKind = .missing
     static let errorKind: TestKind = .error
+    static let serializationID = "org.cambium.tests.test-language"
+    static let serializationVersion: UInt32 = 1
 
     static func rawKind(for kind: TestKind) -> RawSyntaxKind {
         RawSyntaxKind(kind.rawValue)
@@ -56,6 +59,24 @@ private enum TestLanguage: SyntaxLanguage {
 
     static func name(for kind: TestKind) -> String {
         "\(kind)"
+    }
+}
+
+private enum OtherLanguage: SyntaxLanguage {
+    typealias Kind = TestKind
+
+    static let rootKind: TestKind = .root
+    static let missingKind: TestKind = .missing
+    static let errorKind: TestKind = .error
+    static let serializationID = "org.cambium.tests.other-language"
+    static let serializationVersion: UInt32 = 1
+
+    static func rawKind(for kind: TestKind) -> RawSyntaxKind {
+        TestLanguage.rawKind(for: kind)
+    }
+
+    static func kind(for raw: RawSyntaxKind) -> TestKind {
+        TestLanguage.kind(for: raw)
     }
 }
 
@@ -231,4 +252,169 @@ private enum ListSpec: TypedSyntaxNode {
     let metadata = SyntaxMetadataStore<TestLanguage>()
     metadata.set(42, for: key, on: handle)
     #expect(metadata.value(for: key, on: handle) == 42)
+}
+
+@Test func serializationRoundTripsFullTreeAndFreshTreeIdentity() throws {
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.root)
+    try builder.token(.identifier, text: "alpha")
+    try builder.staticToken(.whitespace)
+    try builder.staticToken(.plus)
+    try builder.staticToken(.whitespace)
+    try builder.largeToken(.identifier, text: String(repeating: "z", count: 80))
+    builder.missingToken(.missing)
+    try builder.finishNode()
+
+    let result = try builder.finish()
+    let tree = result.makeSyntaxTree()
+    let originalTreeID = tree.treeID
+    let bytes = try tree.serializeGreenSnapshot()
+    let decoded = try GreenSnapshotDecoder.decodeTree(bytes, as: TestLanguage.self)
+
+    let decodedText = decoded.withRoot { root in
+        root.makeString()
+    }
+    #expect(decodedText == "alpha + \(String(repeating: "z", count: 80))")
+    #expect(decoded.treeID != originalTreeID)
+}
+
+@Test func serializationRoundTripsSubtreeOnly() throws {
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.root)
+    builder.startNode(.list)
+    try builder.token(.identifier, text: "left")
+    try builder.finishNode()
+    builder.startNode(.list)
+    try builder.token(.identifier, text: "right")
+    try builder.finishNode()
+    try builder.finishNode()
+
+    let result = try builder.finish()
+    let tree = result.makeSyntaxTree()
+    let bytes = try tree.withRoot { root in
+        try root.withChildNode(at: 1) { child in
+            try child.serializeGreenSubtree()
+        }!
+    }
+    let decoded = try GreenSnapshotDecoder.decodeBuildResult(bytes, as: TestLanguage.self)
+    let decodedTree = decoded.makeSyntaxTree()
+
+    let text = decodedTree.withRoot { root in
+        root.makeString()
+    }
+    #expect(text == "right")
+    #expect(decoded.root.rawKind == RawSyntaxKind(TestKind.list.rawValue))
+}
+
+@Test func serializationCanonicalizesRuntimeTokenKeysAfterReplacement() throws {
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.root)
+    builder.startNode(.list)
+    try builder.token(.identifier, text: "old")
+    try builder.finishNode()
+    try builder.finishNode()
+
+    let result = try builder.finish()
+    let tree = result.makeSyntaxTree()
+    let shared = tree.share()
+    let anchor = shared.withRoot { root in
+        root.withChildNode(at: 0) { child in
+            child.makeAnchor()
+        }!
+    }
+
+    var replacementBuilder = GreenTreeBuilder<TestLanguage>()
+    replacementBuilder.startNode(.list)
+    try replacementBuilder.token(.identifier, text: "new")
+    try replacementBuilder.finishNode()
+    let replacement = try replacementBuilder.finish()
+
+    var cache = GreenNodeCache<TestLanguage>()
+    let replaced = try shared.replacing(anchor, with: replacement, cache: &cache)!
+    let bytes = try replaced.serializeGreenSnapshot()
+    let decoded = try GreenSnapshotDecoder.decodeTree(bytes, as: TestLanguage.self)
+
+    let text = decoded.withRoot { root in
+        root.makeString()
+    }
+    #expect(text == "new")
+}
+
+@Test func serializationRejectsLanguageMismatchAndTruncation() throws {
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.root)
+    try builder.token(.identifier, text: "a")
+    try builder.finishNode()
+    let bytes = try builder.finish().serializeGreenSnapshot()
+
+    #expect(throws: CambiumSerializationError.languageMismatch(
+        expectedID: OtherLanguage.serializationID,
+        foundID: TestLanguage.serializationID,
+        expectedVersion: OtherLanguage.serializationVersion,
+        foundVersion: TestLanguage.serializationVersion
+    )) {
+        _ = try GreenSnapshotDecoder.decodeTree(bytes, as: OtherLanguage.self)
+    }
+
+    #expect(throws: CambiumSerializationError.truncatedInput) {
+        _ = try GreenSnapshotDecoder.decodeTree(Array(bytes.dropLast()), as: TestLanguage.self)
+    }
+}
+
+@Test func serializationRejectsInvalidStaticTokenLength() throws {
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.root)
+    try builder.staticToken(.plus)
+    try builder.finishNode()
+    var bytes = try builder.finish().serializeGreenSnapshot()
+
+    let plusKind = Array(UInt32(TestKind.plus.rawValue).littleEndianBytes)
+    let plusIndex = bytes.firstIndex(ofSequence: plusKind)!
+    let textLengthIndex = plusIndex + 4
+    bytes[textLengthIndex] = 2
+
+    #expect(throws: CambiumSerializationError.staticTextLengthMismatch(
+        kind: RawSyntaxKind(TestKind.plus.rawValue),
+        expected: 2,
+        actual: 1
+    )) {
+        _ = try GreenSnapshotDecoder.decodeTree(bytes, as: TestLanguage.self)
+    }
+}
+
+@Test func serializationRejectsHashMismatch() throws {
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.root)
+    try builder.token(.identifier, text: "a")
+    try builder.finishNode()
+    var bytes = try builder.finish().serializeGreenSnapshot()
+
+    let identifierKind = Array(UInt32(TestKind.identifier.rawValue).littleEndianBytes)
+    let identifierIndex = bytes.firstIndex(ofSequence: identifierKind)!
+    let hashIndex = identifierIndex + 8
+    bytes[hashIndex] ^= 0xff
+
+    #expect(throws: CambiumSerializationError.self) {
+        _ = try GreenSnapshotDecoder.decodeTree(bytes, as: TestLanguage.self)
+    }
+}
+
+private extension FixedWidthInteger {
+    var littleEndianBytes: [UInt8] {
+        withUnsafeBytes(of: littleEndian) { Array($0) }
+    }
+}
+
+private extension Array where Element == UInt8 {
+    func firstIndex(ofSequence needle: [UInt8]) -> Int? {
+        guard !needle.isEmpty, needle.count <= count else {
+            return nil
+        }
+        for index in 0...(count - needle.count) {
+            if Array(self[index..<(index + needle.count)]) == needle {
+                return index
+            }
+        }
+        return nil
+    }
 }

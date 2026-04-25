@@ -39,9 +39,20 @@ public protocol SyntaxLanguage: Sendable {
     static func isNode(_ kind: Kind) -> Bool
     static func isToken(_ kind: Kind) -> Bool
     static func name(for kind: Kind) -> String
+
+    static var serializationID: String { get }
+    static var serializationVersion: UInt32 { get }
 }
 
 public extension SyntaxLanguage {
+    static var serializationID: String {
+        String(reflecting: Self.self)
+    }
+
+    static var serializationVersion: UInt32 {
+        1
+    }
+
     static func staticText(for kind: Kind) -> StaticString? {
         nil
     }

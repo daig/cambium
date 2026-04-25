@@ -4,3 +4,4 @@
 @_exported import CambiumCore
 @_exported import CambiumIncremental
 @_exported import CambiumOwnedTraversal
+@_exported import CambiumSerialization
