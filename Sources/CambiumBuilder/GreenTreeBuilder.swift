@@ -1,0 +1,697 @@
+import CambiumCore
+import Synchronization
+
+final class MutexBox<Value>: @unchecked Sendable {
+    let mutex: Mutex<Value>
+
+    init(_ value: sending Value) {
+        self.mutex = Mutex(value)
+    }
+}
+
+public enum GreenCachePolicy: Sendable, Hashable {
+    case disabled
+    case documentLocal
+    case parseSession(maxBytes: Int)
+    case shared(maxBytes: Int)
+
+    var maxEntries: Int {
+        switch self {
+        case .disabled:
+            0
+        case .documentLocal:
+            16_384
+        case .parseSession(let maxBytes), .shared(let maxBytes):
+            max(128, maxBytes / 128)
+        }
+    }
+}
+
+final class LocalTokenInternerStorage: @unchecked Sendable {
+    var keysByText: [[UInt8]: TokenKey] = [:]
+    var textByKey: [String] = []
+    var largeText: [String] = []
+}
+
+public struct LocalTokenInterner: ~Copyable {
+    private let storage: LocalTokenInternerStorage
+
+    public init() {
+        self.storage = LocalTokenInternerStorage()
+    }
+
+    init(storage: LocalTokenInternerStorage) {
+        self.storage = storage
+    }
+
+    public mutating func intern(_ text: String) -> TokenKey {
+        var copy = text
+        return copy.withUTF8 { bytes in
+            intern(bytes)
+        }
+    }
+
+    public mutating func intern(_ bytes: UnsafeBufferPointer<UInt8>) -> TokenKey {
+        let keyBytes = Array(bytes)
+        if let key = storage.keysByText[keyBytes] {
+            return key
+        }
+        let key = TokenKey(UInt32(storage.textByKey.count))
+        storage.keysByText[keyBytes] = key
+        storage.textByKey.append(String(decoding: bytes, as: UTF8.self))
+        return key
+    }
+
+    public mutating func storeLargeText(_ text: String) -> LargeTokenTextID {
+        let id = LargeTokenTextID(UInt32(storage.largeText.count))
+        storage.largeText.append(text)
+        return id
+    }
+
+    public borrowing func snapshot() -> TokenTextResolver {
+        TokenTextResolver(interned: storage.textByKey, large: storage.largeText)
+    }
+}
+
+public final class SharedTokenInterner: TokenResolver, @unchecked Sendable {
+    struct Shard {
+        var keysByText: [[UInt8]: TokenKey] = [:]
+        var textByKey: [String] = []
+    }
+
+    private let shards: [MutexBox<Shard>]
+
+    public init(shardCount: Int = 8) {
+        precondition(shardCount > 0, "SharedTokenInterner requires at least one shard")
+        self.shards = (0..<shardCount).map { _ in
+            MutexBox(Shard())
+        }
+    }
+
+    public func intern(_ text: String) -> TokenKey {
+        var copy = text
+        return copy.withUTF8 { bytes in
+            intern(bytes)
+        }
+    }
+
+    public func intern(_ bytes: UnsafeBufferPointer<UInt8>) -> TokenKey {
+        let keyBytes = Array(bytes)
+        let shardIndex = abs(keyBytes.hashValue) % shards.count
+        return shards[shardIndex].mutex.withLock { shard in
+            if let key = shard.keysByText[keyBytes] {
+                return key
+            }
+            let key = TokenKey(UInt32(shardIndex << 24 | shard.textByKey.count))
+            shard.keysByText[keyBytes] = key
+            shard.textByKey.append(String(decoding: bytes, as: UTF8.self))
+            return key
+        }
+    }
+
+    public func resolve(_ key: TokenKey) -> String {
+        let shardIndex = Int(key.rawValue >> 24)
+        let localIndex = Int(key.rawValue & 0x00ff_ffff)
+        precondition(shards.indices.contains(shardIndex), "Unknown shared token key \(key.rawValue)")
+        return shards[shardIndex].mutex.withLock { shard in
+            precondition(shard.textByKey.indices.contains(localIndex), "Unknown shared token key \(key.rawValue)")
+            return shard.textByKey[localIndex]
+        }
+    }
+
+    public func withUTF8<R>(
+        _ key: TokenKey,
+        _ body: (UnsafeBufferPointer<UInt8>) throws -> R
+    ) rethrows -> R {
+        let text = resolve(key)
+        return try text.utf8.withContiguousStorageIfAvailable(body)
+            ?? Array(text.utf8).withUnsafeBufferPointer(body)
+    }
+}
+
+struct TokenCacheKey: Hashable {
+    var rawKind: RawSyntaxKind
+    var textLength: TextSize
+    var text: TokenTextStorage
+}
+
+struct NodeCacheKey: Hashable {
+    var rawKind: RawSyntaxKind
+    var textLength: TextSize
+    var childCount: Int
+    var structuralHash: UInt64
+}
+
+final class GreenNodeCacheStorage<Lang: SyntaxLanguage>: @unchecked Sendable {
+    let policy: GreenCachePolicy
+    var tokenCache: [TokenCacheKey: GreenToken<Lang>] = [:]
+    var nodeCache: [NodeCacheKey: [GreenNode<Lang>]] = [:]
+    let interner: LocalTokenInternerStorage
+    var hits: Int = 0
+    var misses: Int = 0
+    var evictions: Int = 0
+
+    init(policy: GreenCachePolicy, interner: LocalTokenInternerStorage = LocalTokenInternerStorage()) {
+        self.policy = policy
+        self.interner = interner
+    }
+
+    var isEnabled: Bool {
+        policy.maxEntries > 0
+    }
+
+    func trimIfNeeded() {
+        guard isEnabled else {
+            tokenCache.removeAll(keepingCapacity: false)
+            nodeCache.removeAll(keepingCapacity: false)
+            return
+        }
+
+        let maxEntries = policy.maxEntries
+        while tokenCache.count + nodeCache.count > maxEntries {
+            if let key = tokenCache.keys.first {
+                tokenCache.removeValue(forKey: key)
+                evictions += 1
+            } else if let key = nodeCache.keys.first {
+                nodeCache.removeValue(forKey: key)
+                evictions += 1
+            } else {
+                break
+            }
+        }
+    }
+}
+
+public struct GreenNodeCache<Lang: SyntaxLanguage>: ~Copyable {
+    fileprivate let storage: GreenNodeCacheStorage<Lang>
+
+    public init(policy: GreenCachePolicy = .documentLocal) {
+        self.storage = GreenNodeCacheStorage(policy: policy)
+    }
+
+    init(storage: GreenNodeCacheStorage<Lang>) {
+        self.storage = storage
+    }
+
+    public var policy: GreenCachePolicy {
+        storage.policy
+    }
+
+    public var hitCount: Int {
+        storage.hits
+    }
+
+    public var missCount: Int {
+        storage.misses
+    }
+
+    public var evictionCount: Int {
+        storage.evictions
+    }
+
+    public mutating func intern(_ text: String) -> TokenKey {
+        var interner = LocalTokenInterner(storage: storage.interner)
+        return interner.intern(text)
+    }
+
+    public mutating func makeToken(
+        kind: RawSyntaxKind,
+        textLength: TextSize,
+        text: TokenTextStorage = .staticText
+    ) -> GreenToken<Lang> {
+        let key = TokenCacheKey(rawKind: kind, textLength: textLength, text: text)
+        if storage.isEnabled, let cached = storage.tokenCache[key] {
+            storage.hits += 1
+            return cached
+        }
+
+        storage.misses += 1
+        let token = GreenToken<Lang>(kind: kind, textLength: textLength, text: text)
+        if storage.isEnabled {
+            storage.tokenCache[key] = token
+            storage.trimIfNeeded()
+        }
+        return token
+    }
+
+    public mutating func makeNode(
+        kind: RawSyntaxKind,
+        children: [GreenElement<Lang>]
+    ) throws -> GreenNode<Lang> {
+        let candidate = try GreenNode<Lang>(kind: kind, children: children)
+        let key = NodeCacheKey(
+            rawKind: candidate.rawKind,
+            textLength: candidate.textLength,
+            childCount: candidate.childCount,
+            structuralHash: candidate.structuralHash
+        )
+
+        if storage.isEnabled, let bucket = storage.nodeCache[key] {
+            for existing in bucket where existing == candidate {
+                storage.hits += 1
+                return existing
+            }
+        }
+
+        storage.misses += 1
+        if storage.isEnabled {
+            storage.nodeCache[key, default: []].append(candidate)
+            storage.trimIfNeeded()
+        }
+        return candidate
+    }
+
+    consuming func takeStorage() -> GreenNodeCacheStorage<Lang> {
+        storage
+    }
+}
+
+public final class SharedGreenNodeCache<Lang: SyntaxLanguage>: @unchecked Sendable {
+    private let shards: [MutexBox<GreenNodeCacheStorage<Lang>>]
+
+    public init(policy: GreenCachePolicy = .shared(maxBytes: 16 * 1024 * 1024), shardCount: Int = 8) {
+        precondition(shardCount > 0, "SharedGreenNodeCache requires at least one shard")
+        self.shards = (0..<shardCount).map { _ in
+            MutexBox(GreenNodeCacheStorage(policy: policy))
+        }
+    }
+
+    public func withShard<R>(
+        for rawKind: RawSyntaxKind,
+        _ body: (inout GreenNodeCache<Lang>) throws -> R
+    ) rethrows -> R {
+        let index = Int(rawKind.rawValue % UInt32(shards.count))
+        return try shards[index].mutex.withLock { storage in
+            var cache = GreenNodeCache<Lang>(storage: storage)
+            return try body(&cache)
+        }
+    }
+}
+
+public struct BuilderCheckpoint: Sendable, Hashable {
+    fileprivate let parentCount: Int
+    fileprivate let childCount: Int
+
+    public init(parentCount: Int, childCount: Int) {
+        self.parentCount = parentCount
+        self.childCount = childCount
+    }
+}
+
+public enum GreenTreeBuilderError: Error, Sendable, Equatable {
+    case unbalancedStartNodes(Int)
+    case finishWithoutNode
+    case noRoot
+    case multipleRoots(Int)
+    case invalidCheckpoint
+    case childIndexIsToken
+    case staticTextUnavailable(RawSyntaxKind)
+    case staticTextLengthOverflow
+}
+
+struct OpenNode {
+    var kind: RawSyntaxKind
+    var firstChildIndex: Int
+}
+
+public struct GreenBuildResult<Lang: SyntaxLanguage>: Sendable {
+    public let root: GreenNode<Lang>
+    public let resolver: TokenTextResolver
+
+    public init(root: GreenNode<Lang>, resolver: TokenTextResolver) {
+        self.root = root
+        self.resolver = resolver
+    }
+
+    public func makeSyntaxTree() -> SyntaxTree<Lang> {
+        SyntaxTree(root: root, resolver: resolver)
+    }
+}
+
+final class OverlayTokenResolver: TokenResolver, @unchecked Sendable {
+    private let base: any TokenResolver
+    private let interned: [TokenKey: String]
+    private let large: [LargeTokenTextID: String]
+
+    init(
+        base: any TokenResolver,
+        interned: [TokenKey: String],
+        large: [LargeTokenTextID: String]
+    ) {
+        self.base = base
+        self.interned = interned
+        self.large = large
+    }
+
+    func resolve(_ key: TokenKey) -> String {
+        interned[key] ?? base.resolve(key)
+    }
+
+    func resolveLargeText(_ id: LargeTokenTextID) -> String {
+        large[id] ?? base.resolveLargeText(id)
+    }
+
+    func withUTF8<R>(
+        _ key: TokenKey,
+        _ body: (UnsafeBufferPointer<UInt8>) throws -> R
+    ) rethrows -> R {
+        if let text = interned[key] {
+            return try text.utf8.withContiguousStorageIfAvailable(body)
+                ?? Array(text.utf8).withUnsafeBufferPointer(body)
+        }
+        return try base.withUTF8(key, body)
+    }
+
+    func withLargeTextUTF8<R>(
+        _ id: LargeTokenTextID,
+        _ body: (UnsafeBufferPointer<UInt8>) throws -> R
+    ) rethrows -> R {
+        if let text = large[id] {
+            return try text.utf8.withContiguousStorageIfAvailable(body)
+                ?? Array(text.utf8).withUnsafeBufferPointer(body)
+        }
+        return try base.withLargeTextUTF8(id, body)
+    }
+}
+
+struct ReplacementTokenRemapper<Lang: SyntaxLanguage> {
+    var nextInterned: UInt32 = UInt32.max
+    var nextLarge: UInt32 = UInt32.max
+    var interned: [TokenKey: String] = [:]
+    var large: [LargeTokenTextID: String] = [:]
+    var internedMap: [TokenKey: TokenKey] = [:]
+    var largeMap: [LargeTokenTextID: LargeTokenTextID] = [:]
+
+    mutating func remap(
+        node: GreenNode<Lang>,
+        replacementResolver: any TokenResolver,
+        cache: inout GreenNodeCache<Lang>
+    ) throws -> GreenNode<Lang> {
+        var children: [GreenElement<Lang>] = []
+        children.reserveCapacity(node.childCount)
+        for childIndex in 0..<node.childCount {
+            switch node.child(at: childIndex) {
+            case .node(let child):
+                children.append(.node(try remap(
+                    node: child,
+                    replacementResolver: replacementResolver,
+                    cache: &cache
+                )))
+            case .token(let token):
+                children.append(.token(remap(
+                    token: token,
+                    replacementResolver: replacementResolver,
+                    cache: &cache
+                )))
+            }
+        }
+        return try cache.makeNode(kind: node.rawKind, children: children)
+    }
+
+    mutating func remap(
+        token: GreenToken<Lang>,
+        replacementResolver: any TokenResolver,
+        cache: inout GreenNodeCache<Lang>
+    ) -> GreenToken<Lang> {
+        let text: TokenTextStorage
+        switch token.textStorage {
+        case .staticText:
+            text = .staticText
+        case .interned(let key):
+            let mapped = internedMap[key] ?? {
+                let newKey = TokenKey(nextInterned)
+                nextInterned -= 1
+                internedMap[key] = newKey
+                interned[newKey] = replacementResolver.resolve(key)
+                return newKey
+            }()
+            text = .interned(mapped)
+        case .ownedLargeText(let id):
+            let mapped = largeMap[id] ?? {
+                let newID = LargeTokenTextID(nextLarge)
+                nextLarge -= 1
+                largeMap[id] = newID
+                large[newID] = replacementResolver.resolveLargeText(id)
+                return newID
+            }()
+            text = .ownedLargeText(mapped)
+        }
+        return cache.makeToken(kind: token.rawKind, textLength: token.textLength, text: text)
+    }
+}
+
+public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
+    private let cacheStorage: GreenNodeCacheStorage<Lang>
+    private var parents: [OpenNode]
+    private var children: [GreenElement<Lang>]
+    private var finished: Bool
+
+    public init(cache: consuming GreenNodeCache<Lang>) {
+        self.cacheStorage = cache.takeStorage()
+        self.parents = []
+        self.children = []
+        self.finished = false
+    }
+
+    public init(policy: GreenCachePolicy = .documentLocal) {
+        let cache = GreenNodeCacheStorage<Lang>(policy: policy)
+        self.cacheStorage = cache
+        self.parents = []
+        self.children = []
+        self.finished = false
+    }
+
+    public mutating func startNode(_ kind: Lang.Kind) {
+        startNode(rawKind: Lang.rawKind(for: kind))
+    }
+
+    public mutating func startNode(rawKind: RawSyntaxKind) {
+        precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
+        parents.append(OpenNode(kind: rawKind, firstChildIndex: children.count))
+    }
+
+    public mutating func finishNode() throws {
+        precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
+        guard let parent = parents.popLast() else {
+            throw GreenTreeBuilderError.finishWithoutNode
+        }
+
+        let nodeChildren = Array(children[parent.firstChildIndex...])
+        children.removeSubrange(parent.firstChildIndex...)
+
+        var cache = GreenNodeCache<Lang>(storage: cacheStorage)
+        let node = try cache.makeNode(kind: parent.kind, children: nodeChildren)
+        children.append(.node(node))
+    }
+
+    public mutating func token(_ kind: Lang.Kind, text: String) throws {
+        var copy = text
+        try copy.withUTF8 { bytes in
+            try token(kind, bytes: bytes)
+        }
+    }
+
+    public mutating func token(_ kind: Lang.Kind, bytes: UnsafeBufferPointer<UInt8>) throws {
+        precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
+        var interner = LocalTokenInterner(storage: cacheStorage.interner)
+        let key = interner.intern(bytes)
+        let length = try TextSize(exactly: bytes.count)
+        var cache = GreenNodeCache<Lang>(storage: cacheStorage)
+        children.append(.token(cache.makeToken(
+            kind: Lang.rawKind(for: kind),
+            textLength: length,
+            text: .interned(key)
+        )))
+    }
+
+    public mutating func largeToken(_ kind: Lang.Kind, text: String) throws {
+        precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
+        var interner = LocalTokenInterner(storage: cacheStorage.interner)
+        let id = interner.storeLargeText(text)
+        let length = try TextSize(byteCountOf: text)
+        var cache = GreenNodeCache<Lang>(storage: cacheStorage)
+        children.append(.token(cache.makeToken(
+            kind: Lang.rawKind(for: kind),
+            textLength: length,
+            text: .ownedLargeText(id)
+        )))
+    }
+
+    public mutating func staticToken(_ kind: Lang.Kind) throws {
+        precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
+        guard let text = Lang.staticText(for: kind) else {
+            throw GreenTreeBuilderError.staticTextUnavailable(Lang.rawKind(for: kind))
+        }
+        let length: TextSize
+        do {
+            var byteCount = 0
+            text.withUTF8Buffer { bytes in
+                byteCount = bytes.count
+            }
+            length = try TextSize(exactly: byteCount)
+        } catch {
+            throw GreenTreeBuilderError.staticTextLengthOverflow
+        }
+
+        var cache = GreenNodeCache<Lang>(storage: cacheStorage)
+        children.append(.token(cache.makeToken(
+            kind: Lang.rawKind(for: kind),
+            textLength: length,
+            text: .staticText
+        )))
+    }
+
+    public mutating func missingToken(_ kind: Lang.Kind) {
+        precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
+        var cache = GreenNodeCache<Lang>(storage: cacheStorage)
+        children.append(.token(cache.makeToken(
+            kind: Lang.rawKind(for: kind),
+            textLength: .zero,
+            text: .staticText
+        )))
+    }
+
+    public mutating func missingNode(_ kind: Lang.Kind) throws {
+        precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
+        var cache = GreenNodeCache<Lang>(storage: cacheStorage)
+        children.append(.node(try cache.makeNode(kind: Lang.rawKind(for: kind), children: [])))
+    }
+
+    public mutating func checkpoint() -> BuilderCheckpoint {
+        BuilderCheckpoint(parentCount: parents.count, childCount: children.count)
+    }
+
+    public mutating func startNode(at checkpoint: BuilderCheckpoint, _ kind: Lang.Kind) throws {
+        try validate(checkpoint)
+        let wrapped = Array(children[checkpoint.childCount...])
+        children.removeSubrange(checkpoint.childCount...)
+        parents.append(OpenNode(kind: Lang.rawKind(for: kind), firstChildIndex: children.count))
+        children.append(contentsOf: wrapped)
+    }
+
+    public mutating func revert(to checkpoint: BuilderCheckpoint) throws {
+        try validate(checkpoint)
+        parents.removeSubrange(checkpoint.parentCount...)
+        children.removeSubrange(checkpoint.childCount...)
+    }
+
+    public mutating func reuseSubtree(_ node: borrowing SyntaxNodeCursor<Lang>) {
+        precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
+        node.green { green in
+            children.append(.node(green))
+        }
+    }
+
+    public consuming func finish() throws -> GreenBuildResult<Lang> {
+        if !parents.isEmpty {
+            throw GreenTreeBuilderError.unbalancedStartNodes(parents.count)
+        }
+        guard !children.isEmpty else {
+            throw GreenTreeBuilderError.noRoot
+        }
+        guard children.count == 1 else {
+            throw GreenTreeBuilderError.multipleRoots(children.count)
+        }
+        guard case .node(let root) = children[0] else {
+            throw GreenTreeBuilderError.noRoot
+        }
+        finished = true
+        let interner = LocalTokenInterner(storage: cacheStorage.interner)
+        return GreenBuildResult(root: root, resolver: interner.snapshot())
+    }
+
+    private func validate(_ checkpoint: BuilderCheckpoint) throws {
+        guard checkpoint.parentCount <= parents.count,
+              checkpoint.childCount <= children.count
+        else {
+            throw GreenTreeBuilderError.invalidCheckpoint
+        }
+    }
+}
+
+public extension SyntaxNodeCursor {
+    borrowing func replacingSelf(
+        with replacement: GreenNode<Lang>,
+        using cache: inout GreenNodeCache<Lang>
+    ) throws -> GreenNode<Lang> {
+        let path = childIndexPath()
+        return try rebuildReplacing(
+            root: rootGreen,
+            path: ArraySlice(path),
+            replacement: replacement,
+            cache: &cache
+        )
+    }
+}
+
+private func rebuildReplacing<Lang: SyntaxLanguage>(
+    root: GreenNode<Lang>,
+    path: ArraySlice<UInt32>,
+    replacement: GreenNode<Lang>,
+    cache: inout GreenNodeCache<Lang>
+) throws -> GreenNode<Lang> {
+    guard let first = path.first else {
+        return replacement
+    }
+
+    var children = root.childrenArray()
+    let index = Int(first)
+    guard children.indices.contains(index) else {
+        throw GreenTreeBuilderError.invalidCheckpoint
+    }
+    guard case .node(let child) = children[index] else {
+        throw GreenTreeBuilderError.childIndexIsToken
+    }
+    let rebuilt = try rebuildReplacing(
+        root: child,
+        path: path.dropFirst(),
+        replacement: replacement,
+        cache: &cache
+    )
+    children[index] = .node(rebuilt)
+    return try cache.makeNode(kind: root.rawKind, children: children)
+}
+
+public extension SharedSyntaxTree {
+    func replacing(
+        _ anchor: SyntaxAnchor<Lang>,
+        with replacement: GreenNode<Lang>,
+        cache: inout GreenNodeCache<Lang>
+    ) throws -> SyntaxTree<Lang>? {
+        var newRoot: GreenNode<Lang>?
+        try resolve(anchor) { node in
+            newRoot = try node.replacingSelf(with: replacement, using: &cache)
+        }
+        guard let newRoot else {
+            return nil
+        }
+        return SyntaxTree(root: newRoot, resolver: resolver)
+    }
+
+    func replacing(
+        _ anchor: SyntaxAnchor<Lang>,
+        with replacement: GreenBuildResult<Lang>,
+        cache: inout GreenNodeCache<Lang>
+    ) throws -> SyntaxTree<Lang>? {
+        var remapper = ReplacementTokenRemapper<Lang>()
+        let remappedReplacement = try remapper.remap(
+            node: replacement.root,
+            replacementResolver: replacement.resolver,
+            cache: &cache
+        )
+
+        var newRoot: GreenNode<Lang>?
+        try resolve(anchor) { node in
+            newRoot = try node.replacingSelf(with: remappedReplacement, using: &cache)
+        }
+        guard let newRoot else {
+            return nil
+        }
+        let overlay = OverlayTokenResolver(
+            base: resolver,
+            interned: remapper.interned,
+            large: remapper.large
+        )
+        return SyntaxTree(root: newRoot, resolver: overlay)
+    }
+}
