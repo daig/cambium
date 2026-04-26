@@ -230,6 +230,109 @@ import Testing
     #expect(session.counters.reusedBytes > 0)
 }
 
+@Test func reuseOracleRejectsNodeOverlappingEdit() throws {
+    let previous = try makeTwoListRoot().share()
+    let editedListRange = secondListRange(in: previous)
+    let edit = TextEdit(range: TextRange(start: 5, end: 6), replacement: "x")
+    let session = IncrementalParseSession<TestLanguage>()
+    let oracle = session.makeReuseOracle(previousTree: previous, edits: [edit])
+
+    let result: Bool? = oracle.withReusableNode(startingAt: editedListRange.start, kind: .list) { _ in
+        Issue.record("Invalidated reuse candidate should not be offered")
+        return true
+    }
+
+    #expect(result == nil)
+    #expect(session.counters.reuseQueries == 1)
+    #expect(session.counters.reuseHits == 0)
+    #expect(session.counters.reusedBytes == 0)
+}
+
+@Test func reuseOracleRejectsInsertionInsideNode() throws {
+    let previous = try makeTwoListRoot().share()
+    let editedListRange = secondListRange(in: previous)
+    let insertion = TextEdit(range: TextRange(start: 5, end: 5), replacement: "x")
+    let input = ParseInput<TestLanguage>(
+        text: "keepoxld",
+        edits: [insertion],
+        previousTree: previous
+    )
+    let session = IncrementalParseSession<TestLanguage>()
+    let oracle = session.makeReuseOracle(for: input)
+
+    let result: Bool? = oracle.withReusableNode(startingAt: editedListRange.start, kind: .list) { _ in
+        Issue.record("Node with insertion inside its old range should not be offered")
+        return true
+    }
+
+    #expect(result == nil)
+}
+
+@Test func reuseOracleAllowsInsertionAtNodeBoundaries() throws {
+    let previous = try makeTwoListRoot().share()
+    let listRange = secondListRange(in: previous)
+    let startInsertion = TextEdit(range: TextRange(start: listRange.start, end: listRange.start), replacement: "x")
+    let endInsertion = TextEdit(range: TextRange(start: listRange.end, end: listRange.end), replacement: "x")
+    let startOracle = ReuseOracle<TestLanguage>(previousTree: previous, edits: [startInsertion])
+    let endOracle = ReuseOracle<TestLanguage>(previousTree: previous, edits: [endInsertion])
+
+    let startResult: Bool? = startOracle.withReusableNode(startingAt: listRange.start, kind: .list) { _ in
+        true
+    }
+    let endResult: Bool? = endOracle.withReusableNode(startingAt: listRange.start, kind: .list) { _ in
+        true
+    }
+
+    #expect(startResult == true)
+    #expect(endResult == true)
+}
+
+@Test func reuseOracleAllowsNodeShiftedByEarlierEdit() throws {
+    let previous = try makeTwoListRoot().share()
+    let listRange = secondListRange(in: previous)
+    let earlierEdit = TextEdit(range: TextRange(start: 1, end: 2), replacement: "xyz")
+    let session = IncrementalParseSession<TestLanguage>()
+    let oracle = session.makeReuseOracle(previousTree: previous, edits: [earlierEdit])
+
+    let result: Bool? = oracle.withReusableNode(startingAt: listRange.start, kind: .list) { node in
+        node.textRange == listRange
+    }
+
+    #expect(result == true)
+    #expect(session.counters.reuseQueries == 1)
+    #expect(session.counters.reuseHits == 1)
+    #expect(session.counters.reusedBytes == UInt64(listRange.length.rawValue))
+}
+
+@Test func reuseOracleRejectsCandidateInvalidatedByAnyEdit() throws {
+    let previous = try makeTwoListRoot().share()
+    let listRange = secondListRange(in: previous)
+    let edits = [
+        TextEdit(range: TextRange(start: 1, end: 2), replacement: "xyz"),
+        TextEdit(range: TextRange(start: 5, end: 5), replacement: "x"),
+    ]
+    let oracle = ReuseOracle<TestLanguage>(previousTree: previous, edits: edits)
+
+    let result: Bool? = oracle.withReusableNode(startingAt: listRange.start, kind: .list) { _ in
+        Issue.record("Candidate invalidated by one edit should not be offered")
+        return true
+    }
+
+    #expect(result == nil)
+}
+
+@Test func reuseOracleCanOfferValidDescendantWhenLargerCandidateIsInvalidated() throws {
+    let previous = try makeNestedListPrefixTree().share()
+    let editAfterInnerList = TextEdit(range: TextRange(start: 2, end: 3), replacement: "y")
+    let oracle = ReuseOracle<TestLanguage>(previousTree: previous, edits: [editAfterInnerList])
+
+    let result: TextRange? = oracle.withReusableNode(startingAt: .zero, kind: .list) { node in
+        node.textRange
+    }
+
+    #expect(result == TextRange(start: 0, end: 2))
+}
+
 private func makeTwoListRoot() throws -> SyntaxTree<TestLanguage> {
     var builder = GreenTreeBuilder<TestLanguage>()
     builder.startNode(.root)
@@ -241,4 +344,23 @@ private func makeTwoListRoot() throws -> SyntaxTree<TestLanguage> {
     try builder.finishNode()
     try builder.finishNode()
     return try builder.finish().snapshot.makeSyntaxTree()
+}
+
+private func makeNestedListPrefixTree() throws -> SyntaxTree<TestLanguage> {
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.root)
+    builder.startNode(.list)
+    builder.startNode(.list)
+    try builder.token(.identifier, text: "ok")
+    try builder.finishNode()
+    try builder.token(.identifier, text: "x")
+    try builder.finishNode()
+    try builder.finishNode()
+    return try builder.finish().snapshot.makeSyntaxTree()
+}
+
+private func secondListRange(in tree: SharedSyntaxTree<TestLanguage>) -> TextRange {
+    tree.withRoot { root in
+        root.withChildNode(at: 1) { $0.textRange }!
+    }
 }

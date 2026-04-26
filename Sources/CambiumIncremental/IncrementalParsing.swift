@@ -150,17 +150,39 @@ public final class IncrementalParseSession<Lang: SyntaxLanguage>: @unchecked Sen
         }
     }
 
-    public func makeReuseOracle(previousTree: SharedSyntaxTree<Lang>?) -> ReuseOracle<Lang> {
-        ReuseOracle(previousTree: previousTree, session: self)
+    /// Create a parser-facing reuse oracle for `previousTree`.
+    ///
+    /// `edits` are interpreted in old-tree coordinates. The oracle will not
+    /// offer a candidate whose old text range is invalidated by any edit.
+    public func makeReuseOracle(
+        previousTree: SharedSyntaxTree<Lang>?,
+        edits: [TextEdit] = []
+    ) -> ReuseOracle<Lang> {
+        ReuseOracle(previousTree: previousTree, edits: edits, session: self)
+    }
+
+    public func makeReuseOracle(for input: ParseInput<Lang>) -> ReuseOracle<Lang> {
+        makeReuseOracle(previousTree: input.previousTree, edits: input.edits)
     }
 }
 
 public struct ReuseOracle<Lang: SyntaxLanguage>: ~Copyable {
     private let previousTree: SharedSyntaxTree<Lang>?
+    private let edits: [TextEdit]
     private let session: IncrementalParseSession<Lang>?
 
-    public init(previousTree: SharedSyntaxTree<Lang>?, session: IncrementalParseSession<Lang>? = nil) {
+    /// Create a parser-facing reuse oracle.
+    ///
+    /// `edits` are interpreted in old-tree coordinates. Candidates whose old
+    /// text ranges map to `.invalidated` through any edit are filtered before
+    /// the parser callback is invoked.
+    public init(
+        previousTree: SharedSyntaxTree<Lang>?,
+        edits: [TextEdit] = [],
+        session: IncrementalParseSession<Lang>? = nil
+    ) {
         self.previousTree = previousTree
+        self.edits = edits
         self.session = session
     }
 
@@ -175,8 +197,14 @@ public struct ReuseOracle<Lang: SyntaxLanguage>: ~Copyable {
         }
 
         let rawKind = Lang.rawKind(for: kind)
+        let edits = edits
         let outcome = try previousTree.withRoot { root in
-            try root.firstReusableNode(startingAt: offset, rawKind: rawKind, body)
+            try root.firstReusableNode(
+                startingAt: offset,
+                rawKind: rawKind,
+                invalidatingEdits: edits,
+                body
+            )
         }
         session?.recordReuseQuery(hitBytes: outcome?.hitBytes)
         return outcome?.value
@@ -187,20 +215,36 @@ private extension SyntaxNodeCursor {
     borrowing func firstReusableNode<R>(
         startingAt offset: TextSize,
         rawKind: RawSyntaxKind,
+        invalidatingEdits edits: [TextEdit],
         _ body: (borrowing SyntaxNodeCursor<Lang>) throws -> R
     ) rethrows -> (value: R, hitBytes: TextSize)? {
-        if textRange.start == offset && self.rawKind == rawKind {
-            let length = textRange.length
+        let range = textRange
+        if range.start == offset && self.rawKind == rawKind && rangeIsReusable(range, through: edits) {
+            let length = range.length
             return (try body(self), length)
         }
 
         var result: (value: R, hitBytes: TextSize)?
         try forEachChild { child in
             if result == nil, child.textRange.start <= offset, offset <= child.textRange.end {
-                result = try child.firstReusableNode(startingAt: offset, rawKind: rawKind, body)
+                result = try child.firstReusableNode(
+                    startingAt: offset,
+                    rawKind: rawKind,
+                    invalidatingEdits: edits,
+                    body
+                )
             }
         }
         return result
+    }
+
+    private func rangeIsReusable(_ range: TextRange, through edits: [TextEdit]) -> Bool {
+        for edit in edits {
+            if case .invalidated = mapRange(range, through: edit) {
+                return false
+            }
+        }
+        return true
     }
 }
 

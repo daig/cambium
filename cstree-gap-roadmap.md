@@ -137,11 +137,32 @@ providing strong building blocks for language parsers.
 
 Incremental work:
 
-1. Define invalidation region computation for one or more text edits.
-2. Extend `ReuseOracle` to check range, kind, green hash, and edit overlap.
-3. Track reused bytes accurately.
-4. Add APIs to reuse green subtrees directly in `GreenTreeBuilder`.
-5. Add parse-session ownership for shared caches, interner policy, and counters.
+1. Done: `ReuseOracle` now consults a list of `TextEdit`s in old-tree
+   coordinates and rejects any candidate whose old range maps to
+   `.invalidated` through any edit. Boundary insertions at a candidate's
+   start or end remain reusable (range shifts but content is intact). The
+   recursive descent continues into a candidate's children when the
+   candidate itself is invalidated, so finer-grained valid descendants can
+   still be offered.
+2. Partially done: `ReuseOracle` now checks range (offset), kind, and edit
+   overlap. Green-hash matching is still future work — useful for catching
+   "the parser asked at a position that happens to have the right kind, but
+   the previous subtree's content was invalidated by something the edit
+   list doesn't capture (e.g., upstream semantic context)." Less critical
+   than edit-overlap; defer until a real parser integration exposes a need.
+3. Done: `recordReuseQuery(hitBytes:)` reflects the matched node's actual
+   `textRange.length`; `IncrementalParseCounters.reusedBytes` accumulates
+   accepted-offer bytes. `recordAcceptedReuse`/`consumeAcceptedReuses`
+   provide a parser-driven log for `ParseWitness` construction.
+4. Done: `GreenTreeBuilder.reuseSubtree` is namespace-aware (fast-path
+   when source and builder share `TokenKeyNamespace`, slow-path remap
+   otherwise) and returns `SubtreeReuseOutcome`.
+5. Partial: `IncrementalParseSession` owns the offer-side counters; the
+   accepted-reuse log lives there too. Cache lifetime is explicitly
+   threaded through `GreenBuildResult.intoCache()`. Shared interner policy
+   is still simple — `LocalTokenInternerStorage` per builder, optional
+   `SharedTokenInterner` for cross-builder coordination, no per-session
+   policy beyond carrying-the-cache.
 6. Add examples showing a hand-written parser using the reuse oracle.
 7. Add small-edit benchmarks comparing full parse and incremental reuse.
 
@@ -249,6 +270,11 @@ Incremental work:
    should be serializable.
 3. Add explicit version migration policy.
 4. Add fuzz or malformed-input tests for decoder robustness.
+5. Cache-aware decoding (`decodeBuildResult`) for load-then-edit workflows —
+   deferred until a real parser/editor consumer measures first-edit latency
+   on freshly loaded trees. See `cstree-audit-findings.md` "Deferred
+   performance items" for context. `SubtreeReuseOutcome` is the diagnostic
+   signal that would trigger picking this back up.
 
 Acceptance criteria:
 

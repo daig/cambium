@@ -235,6 +235,7 @@ Cambium now maintains an explicit FIFO queue across token and node cache entries
 - **SharedTokenInterner key-layout coverage is present.** Focused tests cover A8/A9 without allocating 16 M strings.
 - **A7 is gone**: anchors no longer exist; `WitnessTests.swift` covers the witness-based replacement contract that replaces them.
 - **D3 coverage is present.** `BuilderStaticKindGuardTests.swift` covers the dynamic-text paths (`token`, `largeToken`, `token(_:bytes:)`) rejecting static-text kinds, plus regression guards that the dynamic kinds still work and that `staticToken(_:)` is unaffected.
+- **`ReuseOracle` edit-overlap coverage is present.** `WitnessTests.swift` covers candidate rejection on overlap, internal insertion, multi-edit invalidation, allowed boundary insertions, allowed earlier-edit shift, and recursive descent into a valid descendant when the larger candidate is invalidated.
 - **No `walkPreorderWithTokens` skip/stop test.** Test uses skip on node-only walk only.
 
 ---
@@ -243,11 +244,42 @@ Cambium now maintains an explicit FIFO queue across token and node cache entries
 
 1. **D1/C3** — add `TokenAtOffset` with `none`, `single`, and `between` so IDE
    cursor-boundary queries are represented directly.
-2. **Incremental reuse oracle maturity** — upgrade matching beyond start
-   offset/kind to account for edit invalidation, ranges, and green hashes, then
-   document parser acceptance as the authoritative reuse signal.
+2. **Incremental reuse oracle: green-hash check** — `ReuseOracle` now
+   filters candidates by edit overlap (mapping each candidate's old range
+   through every edit and rejecting `.invalidated` outcomes), so parsers
+   can no longer be offered a subtree whose old text was directly modified.
+   The remaining matching dimension is structural-hash equality —
+   useful when the parser asked at a position that *happens* to have the
+   right kind but the previous subtree was invalidated by something the
+   edit list doesn't capture. Less critical than edit-overlap; pick up
+   when a real parser integration exposes a need.
 3. **B2/B4/B5** — benchmark before changing: cold red-realization locking, wide
    node offset tables, and ARC traffic from copyable green wrappers are
    performance proof items, not current correctness bugs.
+
+## Deferred performance items
+
+### Snapshot decoder load-then-edit slow path
+
+`GreenSnapshotDecoder.decodeSnapshot(_:as:)` returns a `GreenTreeSnapshot`
+whose `TokenTextSnapshot` carries a freshly-minted `TokenKeyNamespace` not
+shared with any builder cache. If the decoded tree is then handed to an
+incremental-parse loop, the first `GreenTreeBuilder.reuseSubtree(_:)` call
+necessarily takes the `.remapped` slow path (re-interning every dynamic
+token, rebuilding green nodes). Subsequent reparses fast-path because the
+new tree's resolver carries the cache namespace. Total work is the same
+either way — the question is whether the latency lands during decode or
+during the first edit.
+
+A cache-aware `decodeBuildResult(_:as:)` returning `GreenBuildResult` would
+move the cost into decode; the implementation is small (~30 lines wrapping
+the existing decoder + a fresh-cache `reuseSubtree`). It is **deferred
+until a real parser/editor consumer integrates and measures whether the
+first-edit latency on loaded trees is a problem worth optimizing for.**
+`SubtreeReuseOutcome` from `reuseSubtree` is the existing diagnostic for
+detecting this case in production: a high `.remapped` rate after the first
+edit on a freshly-loaded tree is the trigger to revisit. Until then, users
+who care can manually decode-then-`reuseSubtree`-into-a-fresh-cache to
+get the same effect.
 
 Cambium's *shape* matches the architecture spec well — green/red split, noncopyable builder, witness-based cross-tree identity, replacement, serialization, macro-derived kinds. The original silent correctness bugs in the A-series are now resolved; remaining work is mostly API completeness, documentation alignment, and performance validation.

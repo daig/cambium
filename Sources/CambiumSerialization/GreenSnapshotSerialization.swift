@@ -416,6 +416,29 @@ private enum DecodedElementRecord {
     )
 }
 
+/// Decoder for the Cambium green-tree snapshot format.
+///
+/// Decoded trees carry a freshly-minted `TokenKeyNamespace` that is not
+/// shared with any builder cache. This is fine for read-only consumption
+/// (analysis tools, AST printers, wire-format transport) and for one-shot
+/// decode-then-discard workflows.
+///
+/// **Load-then-edit caveat.** If the decoded tree will subsequently feed
+/// `GreenTreeBuilder.reuseSubtree(_:)` from an incremental-parse loop, the
+/// first reuse pays a one-time `.remapped` slow path: the source resolver's
+/// namespace doesn't match any builder's cache, so dynamic token keys are
+/// re-interned and the subtree is rebuilt. After that first reparse, the
+/// new tree's resolver carries the cache's namespace, and subsequent
+/// reuses fast-path normally.
+///
+/// The total work is the same either way (one O(N) walk in either decode
+/// or first-reuse). A cache-aware `decodeBuildResult` that moves the cost
+/// into the load step is technically straightforward but is **deferred
+/// until a real parser/editor consumer measures the first-edit latency**
+/// and decides the rebalance is worth the API surface. `SubtreeReuseOutcome`
+/// from `reuseSubtree` is the diagnostic signal: a high `.remapped` rate
+/// across reparses means the cache lineage is broken (either by this
+/// decoder or by a missing `result.intoCache()`).
 public enum GreenSnapshotDecoder {
     public static func decodeTree<Lang: SyntaxLanguage>(
         _ bytes: [UInt8],
