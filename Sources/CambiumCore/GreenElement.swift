@@ -258,6 +258,7 @@ struct GreenNodeHeader {
     var rawKind: RawSyntaxKind
     var textLength: TextSize
     var childCount: Int
+    var nodeChildCount: Int
     var structuralHash: UInt64
 }
 
@@ -274,10 +275,14 @@ public struct GreenNode<Lang: SyntaxLanguage>: @unchecked Sendable, Hashable {
 
     public init(kind: RawSyntaxKind, children: [GreenElement<Lang>] = []) throws {
         var length = TextSize.zero
+        var nodeChildCount = 0
         var childHashes: [UInt64] = []
         childHashes.reserveCapacity(children.count)
 
         for child in children {
+            if case .node = child {
+                nodeChildCount += 1
+            }
             do {
                 length = try length.adding(child.textLength)
             } catch {
@@ -290,6 +295,7 @@ public struct GreenNode<Lang: SyntaxLanguage>: @unchecked Sendable, Hashable {
         self.storage = GreenNode.makeStorage(
             rawKind: kind,
             textLength: length,
+            nodeChildCount: nodeChildCount,
             structuralHash: hash,
             children: children
         )
@@ -306,6 +312,7 @@ public struct GreenNode<Lang: SyntaxLanguage>: @unchecked Sendable, Hashable {
         self.storage = GreenNode.makeStorage(
             rawKind: kind,
             textLength: textLength,
+            nodeChildCount: 0,
             structuralHash: GreenHash.node(rawKind: kind, textLength: textLength, children: []),
             children: []
         )
@@ -314,6 +321,7 @@ public struct GreenNode<Lang: SyntaxLanguage>: @unchecked Sendable, Hashable {
     private static func makeStorage(
         rawKind: RawSyntaxKind,
         textLength: TextSize,
+        nodeChildCount: Int,
         structuralHash: UInt64,
         children: [GreenElement<Lang>]
     ) -> GreenNodeStorage<Lang> {
@@ -321,6 +329,7 @@ public struct GreenNode<Lang: SyntaxLanguage>: @unchecked Sendable, Hashable {
             rawKind: rawKind,
             textLength: textLength,
             childCount: children.count,
+            nodeChildCount: nodeChildCount,
             structuralHash: structuralHash
         )
         let storage = GreenNodeStorage<Lang>.create(minimumCapacity: children.count) { _ in
@@ -351,13 +360,7 @@ public struct GreenNode<Lang: SyntaxLanguage>: @unchecked Sendable, Hashable {
     }
 
     public var nodeChildCount: Int {
-        var count = 0
-        for index in 0..<childCount {
-            if case .node = child(at: index) {
-                count += 1
-            }
-        }
-        return count
+        storage.header.nodeChildCount
     }
 
     public var structuralHash: UInt64 {

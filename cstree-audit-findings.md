@@ -1,12 +1,13 @@
 # Cambium ⇄ Rust `cstree` audit
 
-Cambium implements the green/red separation, builder, interner, anchors, and replacement faithfully. After the red cursor read refactor, the biggest remaining divergences are the green text-offset arithmetic, cold red-realization contention/proof gaps, and a handful of subtle bugs in code paths the test suite does not exercise. Below, "**arch**" is `swift-native-cst-architecture.md`, line numbers pin the original.
+Cambium implements the green/red separation, builder, interner, anchors, and replacement faithfully. After the red cursor read refactor and the green child-offset pass, the biggest remaining divergences are cold red-realization contention/proof gaps and a handful of subtle bugs in code paths the test suite does not exercise. Below, "**arch**" is `swift-native-cst-architecture.md`, line numbers pin the original.
 
 Status update: A1/B1/B6 are now resolved by the lock-free red cursor read
-refactor. B2 remains open, but is downgraded to a cold-path contention and
-benchmark question rather than a hot-read defect. The remaining critical
-correctness/performance concerns start with A2/A3 and the silent correctness
-bugs in A5/A6/A8/A9.
+refactor. A2/A3 are now resolved by cached node-child counts and running
+child-start offsets during traversal. B2 remains open, but is downgraded to a
+cold-path contention and benchmark question rather than a hot-read defect. The
+remaining critical correctness concerns are the silent correctness bugs in
+A5/A6/A8/A9.
 
 ---
 
@@ -42,7 +43,14 @@ child slots now store non-owning record pointers. Publication initializes the
 record, appends it to arena-owned storage, then release-stores the pointer.
 Readers acquire-load and read immutable fields directly.
 
-### A2. `GreenNode.childStartOffset` is O(N), called O(N²) per node iteration
+### A2. Resolved: `GreenNode.childStartOffset` was O(N), called O(N²) per node iteration
+
+**Status:** fixed. Red traversal, token lookup, covering-element lookup, and
+sibling traversal now thread running child-start offsets through child loops and
+pass them into cold red-node realization. `childStartOffset(at:)` remains as a
+direct-index fallback only. A wide mixed node regression test covers offsets
+across node/token traversal, token walks, sibling traversal, range token lookup,
+zero-length missing tokens, and covering-element lookup.
 
 **Where:** `Sources/CambiumCore/GreenElement.swift:383–393`. Hot callers: `RedArena.realizeChildNode:195`, `SyntaxNodeCursor.withRawChildOrToken:596`, `tokens(in:):1085`, `withToken(at:):1122`, `withCoveringElement:1162`, `forEachDescendantOrToken:930`, `walkTokenPreorder:998`.
 
@@ -50,13 +58,20 @@ Every traversal that iterates `0..<childCount` and computes a child offset re-sc
 
 cstree avoids this entirely with `green/iter.rs` + `node.rs:938` (`children_from`) and `:953` (`children_to`), which accumulate offsets in the iterator and visit each child once.
 
-**Fix sketch:** thread an accumulating `offset` through every `for childIndex in 0..<green.childCount` loop, or precompute a child-start table either eagerly in `GreenNodeStorage` (extra storage per wide node) or lazily as arch §25.3 already proposed. The lazy table was specified but not built.
+**Implemented fix:** thread an accumulating `offset` through child loops. Wide
+node offset tables remain a separate B4 optimization for repeated random child
+offset queries, not a prerequisite for linear traversal.
 
-### A3. `SyntaxNodeCursor.childCount` is O(N)
+### A3. Resolved: `SyntaxNodeCursor.childCount` was O(N)
+
+**Status:** fixed. `GreenNodeHeader` now caches `nodeChildCount` at construction,
+so `SyntaxNodeCursor.childCount` is O(1) while `withChildNode(at:)` remains an
+O(N) indexed node-child search.
 
 **Where:** `SyntaxTree.swift:470–472` → `GreenElement.swift:353–361` (`nodeChildCount`). Iterates all green children every call. Combined with `withChildNode(at:)` (`:622–639`) — which itself linearly scans to find the n-th *node* child — node-by-index iteration is O(N²). `childOrTokenCount` is O(1); `childCount` is not.
 
-**Fix sketch:** cache `nodeChildCount` in `GreenNodeHeader` (it never changes after construction) — then `cursor.childCount` becomes O(1), matching cstree's `arity_with_tokens()`.
+**Implemented fix:** cache `nodeChildCount` in `GreenNodeHeader` (it never
+changes after construction).
 
 ### A4. `ReuseOracle` always reports `hitBytes = 0`
 
@@ -145,7 +160,7 @@ Spec §12.3: "Cache aggressively: small green nodes; medium nodes below a config
 
 ### B4. No offset table for wide nodes
 
-Spec §25.3 sketches `ChildOffsetTable { let childStarts: UnsafeBufferPointer<TextSize> }` and recommends building it lazily for wide nodes. Not implemented; A2 is the consequence.
+Spec §25.3 sketches `ChildOffsetTable { let childStarts: UnsafeBufferPointer<TextSize> }` and recommends building it lazily for wide nodes. Not implemented. This is no longer needed for ordinary traversal after the A2 fix, but may still be useful for repeated random offset lookups on very wide nodes.
 
 ### B5. Green types are copyable wrappers that retain on every child access
 
@@ -205,7 +220,7 @@ Spec §25.4 prescribes "maximum bytes; maximum entries; eviction strategy; instr
 | D10 | `SyntaxNode::write_display` (streaming render) | only `makeString` (allocating) | Cambium has `writeUTF8` on `SyntaxText`, but not as a node convenience |
 | D11 | Interner `KeySpaceExhausted` error | silent overflow / aliased keys (A8) | |
 | D12 | `Direction` enum reused across siblings/walks | `TraversalDirection` exists but is only used in `forEachSibling` variants | OK but inconsistent surface |
-| D13 | `arity()` (O(N)) and `arity_with_tokens()` (O(1)) | both O(N) due to A3 | |
+| D13 | `arity()` (O(N)) and `arity_with_tokens()` (O(1)) | node count and child-or-token count are O(1) | |
 | D14 | Replacement at root | works (replacement IS the root, no rebuild) | OK in Cambium too — but path is `if path.isEmpty` (`GreenTreeBuilder.swift:633`); fine |
 | D15 | `SyntaxNode::set_data` `try_set_data` `clear_data` | not on handles; only via `SyntaxMetadataStore` | Different design |
 
@@ -216,7 +231,8 @@ Spec §25.4 prescribes "maximum bytes; maximum entries; eviction strategy; instr
 - **Concurrency coverage is still incomplete.** A1/B1 now have focused concurrent lazy-realization coverage, but A6, shared interner/cache contention, and broader Thread Sanitizer coverage still need CI-level follow-through. Arch §28 #8/#9 listed "Concurrent traversal tests" and "Thread Sanitizer suite" as required.
 - **No `missingToken(.plus)`-style test.** A5 hides because every test uses `.missing` (no static text).
 - **No cross-interner `reuseSubtree` test.** A6 hides because tests don't reuse a subtree from a tree with a different interner.
-- **No wide-node tests.** A2 / A3 quadratic regression invisible — every test uses small trees (under ~10 children).
+- **Wide-node traversal coverage is now present.** A focused mixed node/token
+  test covers the A2/A3 offset and node-count regression surface.
 - **No SharedTokenInterner stress tests.** A8 / A9 invisible.
 - **No anchor-after-edit tests with delta > 64 bytes.** A7 invisible.
 - **No `builder.token(.plus, text: "X")` test.** D3 invisible.
@@ -226,10 +242,10 @@ Spec §25.4 prescribes "maximum bytes; maximum entries; eviction strategy; instr
 
 ## Recommended priority
 
-1. **A2 + A3 + B4** (childStartOffset / childCount / no offset table) — these compound; one fix (cache nodeChildCount in header, accumulate offsets in iterators, optional offset table) addresses all three.
-2. **A5, A6, A8, A9** — silent correctness bugs that will eventually bite real users.
-3. **A4, A7, A10** — operational gaps that limit incremental parsing usefulness.
+1. **A5, A6, A8, A9** — silent correctness bugs that will eventually bite real users.
+2. **A4, A7, A10** — operational gaps that limit incremental parsing usefulness.
+3. **B4** — benchmark repeated random lookups on wide nodes before adding an offset table.
 4. **C-series spec fixes** — update arch doc to make `TokenAtOffset.Between`, `missing`-as-distinct-storage, and lock-free read goals explicit, so future contributors don't re-derive the wrong constraints.
 5. **D-series and roadmap** — most of D maps onto roadmap priorities 2/3; D1, D2, D3 should be added.
 
-Cambium's *shape* matches the architecture spec well — green/red split, noncopyable builder, anchors, replacement, serialization, macro-derived kinds. Where it still diverges is mostly invisible from the type signatures (A2, A3) and from happy-path tests (A5, A6). A focused performance + correctness pass on child offset/count behavior and the remaining silent correctness bugs would close the largest gaps with the spec without re-architecting.
+Cambium's *shape* matches the architecture spec well — green/red split, noncopyable builder, anchors, replacement, serialization, macro-derived kinds. Where it still diverges is mostly invisible from happy-path tests (A5, A6) and stress limits (A8, A9). A focused pass on the remaining silent correctness bugs would close the largest gaps with the spec without re-architecting.

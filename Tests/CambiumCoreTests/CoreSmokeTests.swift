@@ -140,6 +140,140 @@ private func describeElement(_ element: borrowing SyntaxElementCursor<TestLangua
     }
 }
 
+private func describeElementWithOffset(_ element: borrowing SyntaxElementCursor<TestLanguage>) -> String {
+    switch element {
+    case .node(let node):
+        "node:\(TestLanguage.name(for: node.kind)):\(node.makeString())@\(node.textRange.start.rawValue)"
+    case .token(let token):
+        describeToken(token)
+    }
+}
+
+private func describeToken(_ token: borrowing SyntaxTokenCursor<TestLanguage>) -> String {
+    "token:\(TestLanguage.name(for: token.kind)):\(token.makeString())@\(token.textRange.start.rawValue)"
+}
+
+private struct WideTraversalFixture: ~Copyable {
+    var tree: SyntaxTree<TestLanguage>
+    var topLevelElements: [String]
+    var descendants: [String]
+    var tokens: [String]
+    var probeNodeTokens: [String]
+    var probeNodeRange: TextRange
+    var probeNodeOrdinal: Int
+    var probeTopLevelIndex: Int
+    var probeTokenOffset: TextSize
+    var probeTokenLabel: String
+    var nodeCount: Int
+}
+
+private func makeWideTraversalFixture() throws -> WideTraversalFixture {
+    let groupCount = 128
+    let probeIndex = 73
+    var builder = GreenTreeBuilder<TestLanguage>()
+    var topLevelElements: [String] = []
+    var descendants: [String] = []
+    var tokens: [String] = []
+    var probeNodeTokens: [String] = []
+    var probeNodeRange = TextRange(start: .zero, length: .zero)
+    var probeTopLevelIndex = 0
+    var probeTokenOffset = TextSize.zero
+    var probeTokenLabel = ""
+    var offset = 0
+
+    func textSize(_ value: Int) -> TextSize {
+        TextSize(rawValue: UInt32(value))
+    }
+
+    func tokenLabel(kind: TestKind, text: String, offset: Int) -> String {
+        "token:\(TestLanguage.name(for: kind)):\(text)@\(offset)"
+    }
+
+    func appendExpectedToken(
+        kind: TestKind,
+        text: String,
+        isTopLevel: Bool,
+        includeInProbeNode: Bool = false
+    ) {
+        let label = tokenLabel(kind: kind, text: text, offset: offset)
+        if isTopLevel {
+            topLevelElements.append(label)
+        }
+        descendants.append(label)
+        tokens.append(label)
+        if includeInProbeNode {
+            probeNodeTokens.append(label)
+        }
+        offset += text.utf8.count
+    }
+
+    builder.startNode(.root)
+    for index in 0..<groupCount {
+        let topIdentifier = "t\(index)"
+        try builder.token(.identifier, text: topIdentifier)
+        appendExpectedToken(kind: .identifier, text: topIdentifier, isTopLevel: true)
+
+        try builder.staticToken(.whitespace)
+        appendExpectedToken(kind: .whitespace, text: " ", isTopLevel: true)
+
+        if index % 17 == 0 {
+            builder.missingToken(.missing)
+            appendExpectedToken(kind: .missing, text: "", isTopLevel: true)
+        }
+
+        let nodeStart = offset
+        let nodeText = "n\(index)+m\(index)"
+        let nodeLabel = "node:\(TestLanguage.name(for: .list)):\(nodeText)@\(nodeStart)"
+        topLevelElements.append(nodeLabel)
+        descendants.append(nodeLabel)
+        if index == probeIndex {
+            probeNodeTokens = []
+            probeNodeRange = TextRange(start: textSize(nodeStart), length: textSize(nodeText.utf8.count))
+            probeTopLevelIndex = topLevelElements.count - 1
+        }
+
+        builder.startNode(.list)
+        let leftText = "n\(index)"
+        try builder.token(.identifier, text: leftText)
+        appendExpectedToken(kind: .identifier, text: leftText, isTopLevel: false, includeInProbeNode: index == probeIndex)
+
+        try builder.staticToken(.plus)
+        appendExpectedToken(kind: .plus, text: "+", isTopLevel: false, includeInProbeNode: index == probeIndex)
+
+        if index % 23 == 0 {
+            builder.missingToken(.missing)
+            appendExpectedToken(kind: .missing, text: "", isTopLevel: false, includeInProbeNode: index == probeIndex)
+        }
+
+        let rightText = "m\(index)"
+        if index == probeIndex {
+            probeTokenOffset = textSize(offset)
+            probeTokenLabel = tokenLabel(kind: .identifier, text: rightText, offset: offset)
+        }
+        try builder.token(.identifier, text: rightText)
+        appendExpectedToken(kind: .identifier, text: rightText, isTopLevel: false, includeInProbeNode: index == probeIndex)
+        try builder.finishNode()
+
+        try builder.staticToken(.whitespace)
+        appendExpectedToken(kind: .whitespace, text: " ", isTopLevel: true)
+    }
+    try builder.finishNode()
+
+    return WideTraversalFixture(
+        tree: try builder.finish().makeSyntaxTree(),
+        topLevelElements: topLevelElements,
+        descendants: descendants,
+        tokens: tokens,
+        probeNodeTokens: probeNodeTokens,
+        probeNodeRange: probeNodeRange,
+        probeNodeOrdinal: probeIndex,
+        probeTopLevelIndex: probeTopLevelIndex,
+        probeTokenOffset: probeTokenOffset,
+        probeTokenLabel: probeTokenLabel,
+        nodeCount: groupCount
+    )
+}
+
 private func describeNodeWalkEvent(_ event: borrowing SyntaxNodeWalkEvent<TestLanguage>) -> String {
     switch event {
     case .enter(let node):
@@ -580,6 +714,106 @@ private func describeElementWalkEvent(_ event: borrowing SyntaxElementWalkEvent<
         "nodesSelf:a b c + d + e + f z|b c + d + e|c + d|e|f",
         "elements:node:list:b c + d + e|token:identifier:b@2|token:whitespace: @3|node:list:c + d|token:identifier:c@4|token:whitespace: @5|token:plus:+@6|token:whitespace: @7|token:identifier:d@8|token:whitespace: @9|token:plus:+@10|token:whitespace: @11|node:list:e|token:identifier:e@12",
     ])
+}
+
+@Test func wideTraversalPreservesOffsetsAcrossMixedChildren() throws {
+    let fixture = try makeWideTraversalFixture()
+
+    let result = fixture.tree.withRoot { root in
+        var topLevel: [String] = []
+        root.forEachChildOrToken { element in
+            topLevel.append(describeElementWithOffset(element))
+        }
+
+        var descendants: [String] = []
+        root.forEachDescendantOrToken { element in
+            descendants.append(describeElementWithOffset(element))
+        }
+
+        var tokens: [String] = []
+        root.tokens { token in
+            tokens.append(describeToken(token))
+        }
+
+        var rangeTokens: [String] = []
+        root.tokens(in: fixture.probeNodeRange) { token in
+            rangeTokens.append(describeToken(token))
+        }
+
+        var walkTokens: [String] = []
+        let walkControl = root.walkPreorderWithTokens { event in
+            switch event {
+            case .enter(let element):
+                switch element {
+                case .node:
+                    break
+                case .token(let token):
+                    walkTokens.append(describeToken(token))
+                }
+            case .leave:
+                break
+            }
+            return .continue
+        }
+
+        let tokenAtProbe = root.withToken(at: fixture.probeTokenOffset) { token in
+            describeToken(token)
+        }
+
+        let coveringProbe = root.withCoveringElement(fixture.probeNodeRange) { element in
+            describeElementWithOffset(element)
+        }
+
+        let siblingProbe = root.withChildNode(at: fixture.probeNodeOrdinal) { node in
+            var forward: [String] = []
+            node.forEachSiblingOrToken(direction: .forward) { element in
+                forward.append(describeElementWithOffset(element))
+            }
+
+            var backward: [String] = []
+            node.forEachSiblingOrToken(direction: .backward) { element in
+                backward.append(describeElementWithOffset(element))
+            }
+
+            let next = node.withNextSiblingOrToken { element in
+                describeElementWithOffset(element)
+            }
+            let previous = node.withPreviousSiblingOrToken { element in
+                describeElementWithOffset(element)
+            }
+
+            return (forward, backward, next, previous)
+        }
+
+        return (
+            root.childCount,
+            root.childOrTokenCount,
+            topLevel,
+            descendants,
+            tokens,
+            rangeTokens,
+            walkControl,
+            walkTokens,
+            tokenAtProbe,
+            coveringProbe,
+            siblingProbe
+        )
+    }
+
+    #expect(result.0 == fixture.nodeCount)
+    #expect(result.1 == fixture.topLevelElements.count)
+    #expect(result.2 == fixture.topLevelElements)
+    #expect(result.3 == fixture.descendants)
+    #expect(result.4 == fixture.tokens)
+    #expect(result.5.filter { !$0.hasPrefix("token:missing:") } == fixture.probeNodeTokens)
+    #expect(result.6 == .continue)
+    #expect(result.7 == fixture.tokens)
+    #expect(result.8 == fixture.probeTokenLabel)
+    #expect(result.9 == fixture.topLevelElements[fixture.probeTopLevelIndex])
+    #expect(result.10?.0 == Array(fixture.topLevelElements[(fixture.probeTopLevelIndex + 1)...]))
+    #expect(result.10?.1 == Array(fixture.topLevelElements[..<fixture.probeTopLevelIndex].reversed()))
+    #expect(result.10?.2 == fixture.topLevelElements[fixture.probeTopLevelIndex + 1])
+    #expect(result.10?.3 == fixture.topLevelElements[fixture.probeTopLevelIndex - 1])
 }
 
 @Test func traversalWalkEventsRespectOrderingSkipAndStop() throws {

@@ -184,7 +184,8 @@ final class RedArena<Lang: SyntaxLanguage>: @unchecked Sendable {
 
     func realizeChildNode(
         parent: RedNodeRecord<Lang>,
-        childIndex: Int
+        childIndex: Int,
+        childStartOffset: TextSize? = nil
     ) -> RedNodeRecord<Lang>? {
         precondition(childIndex >= 0 && childIndex < parent.green.childCount, "Child index out of bounds")
 
@@ -220,7 +221,7 @@ final class RedArena<Lang: SyntaxLanguage>: @unchecked Sendable {
                 green: childGreen,
                 parentRecord: parent,
                 indexInParent: UInt32(childIndex),
-                offset: parent.offset + parent.green.childStartOffset(at: childIndex),
+                offset: parent.offset + (childStartOffset ?? parent.green.childStartOffset(at: childIndex)),
                 childSlotChunk: childSlotLocation.chunk,
                 childSlotStart: childSlotLocation.start,
                 childSlotCount: childGreen.childCount
@@ -546,8 +547,20 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
     public mutating func moveToFirstChild() -> Bool {
         let current = record
         let green = current.green
+        var childStart = TextSize.zero
         for index in 0..<green.childCount {
-            if let child = storage.arena.realizeChildNode(parent: current, childIndex: index) {
+            let childGreen = green.child(at: index)
+            defer {
+                childStart = childStart + childGreen.textLength
+            }
+            guard case .node = childGreen else {
+                continue
+            }
+            if let child = storage.arena.realizeChildNode(
+                parent: current,
+                childIndex: index,
+                childStartOffset: childStart
+            ) {
                 move(to: child)
                 return true
             }
@@ -561,8 +574,21 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
         guard green.childCount > 0 else {
             return false
         }
+        var childEnd = green.textLength
         for index in stride(from: green.childCount - 1, through: 0, by: -1) {
-            if let child = storage.arena.realizeChildNode(parent: current, childIndex: index) {
+            let childGreen = green.child(at: index)
+            let childStart = childEnd - childGreen.textLength
+            defer {
+                childEnd = childStart
+            }
+            guard case .node = childGreen else {
+                continue
+            }
+            if let child = storage.arena.realizeChildNode(
+                parent: current,
+                childIndex: index,
+                childStartOffset: childStart
+            ) {
                 move(to: child)
                 return true
             }
@@ -579,8 +605,20 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
         guard start < parent.green.childCount else {
             return false
         }
+        var childStart = (current.offset - parent.offset) + current.green.textLength
         for index in start..<parent.green.childCount {
-            if let sibling = storage.arena.realizeChildNode(parent: parent, childIndex: index) {
+            let childGreen = parent.green.child(at: index)
+            defer {
+                childStart = childStart + childGreen.textLength
+            }
+            guard case .node = childGreen else {
+                continue
+            }
+            if let sibling = storage.arena.realizeChildNode(
+                parent: parent,
+                childIndex: index,
+                childStartOffset: childStart
+            ) {
                 move(to: sibling)
                 return true
             }
@@ -593,8 +631,21 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
         guard let parent = current.parentRecord, current.indexInParent > 0 else {
             return false
         }
+        var childEnd = current.offset - parent.offset
         for index in stride(from: Int(current.indexInParent) - 1, through: 0, by: -1) {
-            if let sibling = storage.arena.realizeChildNode(parent: parent, childIndex: index) {
+            let childGreen = parent.green.child(at: index)
+            let childStart = childEnd - childGreen.textLength
+            defer {
+                childEnd = childStart
+            }
+            guard case .node = childGreen else {
+                continue
+            }
+            if let sibling = storage.arena.realizeChildNode(
+                parent: parent,
+                childIndex: index,
+                childStartOffset: childStart
+            ) {
                 move(to: sibling)
                 return true
             }
@@ -604,9 +655,14 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
 
     private borrowing func withRawChildNode<R>(
         at childIndex: Int,
+        childStartOffset: TextSize? = nil,
         _ body: (borrowing SyntaxNodeCursor<Lang>) throws -> R
     ) rethrows -> R? {
-        guard let child = storage.arena.realizeChildNode(parent: record, childIndex: childIndex) else {
+        guard let child = storage.arena.realizeChildNode(
+            parent: record,
+            childIndex: childIndex,
+            childStartOffset: childStartOffset
+        ) else {
             return nil
         }
         let cursor = SyntaxNodeCursor(storage: storage, record: child)
@@ -616,6 +672,7 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
     private borrowing func withRawChildOrToken<R>(
         parentRecord: RedNodeRecord<Lang>,
         at childIndex: Int,
+        childStartOffset: TextSize? = nil,
         _ body: (borrowing SyntaxElementCursor<Lang>) throws -> R
     ) rethrows -> R? {
         guard childIndex >= 0 && childIndex < parentRecord.green.childCount else {
@@ -624,7 +681,11 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
 
         switch parentRecord.green.child(at: childIndex) {
         case .node:
-            guard let child = storage.arena.realizeChildNode(parent: parentRecord, childIndex: childIndex) else {
+            guard let child = storage.arena.realizeChildNode(
+                parent: parentRecord,
+                childIndex: childIndex,
+                childStartOffset: childStartOffset
+            ) else {
                 return nil
             }
             let node = SyntaxNodeCursor(storage: storage, record: child)
@@ -635,7 +696,7 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
                 storage: storage,
                 parentRecord: parentRecord,
                 childIndex: UInt32(childIndex),
-                offset: parentRecord.offset + parentRecord.green.childStartOffset(at: childIndex),
+                offset: parentRecord.offset + (childStartOffset ?? parentRecord.green.childStartOffset(at: childIndex)),
                 green: token
             )
             let element = SyntaxElementCursor<Lang>.token(token)
@@ -668,12 +729,17 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
         precondition(nodeIndex >= 0, "Node child index must not be negative")
         let green = record.green
         var seen = 0
+        var childStart = TextSize.zero
         for childIndex in 0..<green.childCount {
-            guard case .node = green.child(at: childIndex) else {
+            let childGreen = green.child(at: childIndex)
+            defer {
+                childStart = childStart + childGreen.textLength
+            }
+            guard case .node = childGreen else {
                 continue
             }
             if seen == nodeIndex {
-                return try withRawChildNode(at: childIndex, body)
+                return try withRawChildNode(at: childIndex, childStartOffset: childStart, body)
             }
             seen += 1
         }
@@ -684,11 +750,16 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
         _ body: (borrowing SyntaxNodeCursor<Lang>) throws -> R
     ) rethrows -> R? {
         let green = record.green
+        var childStart = TextSize.zero
         for childIndex in 0..<green.childCount {
-            guard case .node = green.child(at: childIndex) else {
+            let childGreen = green.child(at: childIndex)
+            defer {
+                childStart = childStart + childGreen.textLength
+            }
+            guard case .node = childGreen else {
                 continue
             }
-            return try withRawChildNode(at: childIndex, body)
+            return try withRawChildNode(at: childIndex, childStartOffset: childStart, body)
         }
         return nil
     }
@@ -700,11 +771,17 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
         guard green.childCount > 0 else {
             return nil
         }
+        var childEnd = green.textLength
         for childIndex in stride(from: green.childCount - 1, through: 0, by: -1) {
-            guard case .node = green.child(at: childIndex) else {
+            let childGreen = green.child(at: childIndex)
+            let childStart = childEnd - childGreen.textLength
+            defer {
+                childEnd = childStart
+            }
+            guard case .node = childGreen else {
                 continue
             }
-            return try withRawChildNode(at: childIndex, body)
+            return try withRawChildNode(at: childIndex, childStartOffset: childStart, body)
         }
         return nil
     }
@@ -722,7 +799,7 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
         guard childOrTokenCount > 0 else {
             return nil
         }
-        return try withRawChildOrToken(at: 0, body)
+        return try withRawChildOrToken(parentRecord: record, at: 0, childStartOffset: .zero, body)
     }
 
     public borrowing func withLastChildOrToken<R>(
@@ -732,7 +809,11 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
         guard count > 0 else {
             return nil
         }
-        return try withRawChildOrToken(at: count - 1, body)
+        let record = record
+        let childIndex = count - 1
+        let child = record.green.child(at: childIndex)
+        let childStart = record.green.textLength - child.textLength
+        return try withRawChildOrToken(parentRecord: record, at: childIndex, childStartOffset: childStart, body)
     }
 
     public borrowing func withNextSibling<R>(
@@ -746,8 +827,19 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
         guard start < parent.green.childCount else {
             return nil
         }
+        var childStart = (current.offset - parent.offset) + current.green.textLength
         for childIndex in start..<parent.green.childCount {
-            guard let child = storage.arena.realizeChildNode(parent: parent, childIndex: childIndex) else {
+            let childGreen = parent.green.child(at: childIndex)
+            defer {
+                childStart = childStart + childGreen.textLength
+            }
+            guard case .node = childGreen,
+                  let child = storage.arena.realizeChildNode(
+                    parent: parent,
+                    childIndex: childIndex,
+                    childStartOffset: childStart
+                  )
+            else {
                 continue
             }
             let cursor = SyntaxNodeCursor(storage: storage, record: child)
@@ -763,8 +855,20 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
         guard let parent = current.parentRecord, current.indexInParent > 0 else {
             return nil
         }
+        var childEnd = current.offset - parent.offset
         for childIndex in stride(from: Int(current.indexInParent) - 1, through: 0, by: -1) {
-            guard let child = storage.arena.realizeChildNode(parent: parent, childIndex: childIndex) else {
+            let childGreen = parent.green.child(at: childIndex)
+            let childStart = childEnd - childGreen.textLength
+            defer {
+                childEnd = childStart
+            }
+            guard case .node = childGreen,
+                  let child = storage.arena.realizeChildNode(
+                    parent: parent,
+                    childIndex: childIndex,
+                    childStartOffset: childStart
+                  )
+            else {
                 continue
             }
             let cursor = SyntaxNodeCursor(storage: storage, record: child)
@@ -781,7 +885,8 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
             return nil
         }
         let childIndex = Int(current.indexInParent) + 1
-        return try withRawChildOrToken(parentRecord: parent, at: childIndex, body)
+        let childStart = (current.offset - parent.offset) + current.green.textLength
+        return try withRawChildOrToken(parentRecord: parent, at: childIndex, childStartOffset: childStart, body)
     }
 
     public borrowing func withPreviousSiblingOrToken<R>(
@@ -792,7 +897,9 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
             return nil
         }
         let childIndex = Int(current.indexInParent) - 1
-        return try withRawChildOrToken(parentRecord: parent, at: childIndex, body)
+        let child = parent.green.child(at: childIndex)
+        let childStart = (current.offset - parent.offset) - child.textLength
+        return try withRawChildOrToken(parentRecord: parent, at: childIndex, childStartOffset: childStart, body)
     }
 
     public borrowing func forEachChild(
@@ -800,9 +907,18 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
     ) rethrows {
         let record = record
         let green = record.green
+        var childStart = TextSize.zero
         for childIndex in 0..<green.childCount {
-            guard case .node = green.child(at: childIndex),
-                  let child = storage.arena.realizeChildNode(parent: record, childIndex: childIndex)
+            let childGreen = green.child(at: childIndex)
+            defer {
+                childStart = childStart + childGreen.textLength
+            }
+            guard case .node = childGreen,
+                  let child = storage.arena.realizeChildNode(
+                    parent: record,
+                    childIndex: childIndex,
+                    childStartOffset: childStart
+                  )
             else {
                 continue
             }
@@ -831,8 +947,19 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
             guard start < parent.green.childCount else {
                 return
             }
+            var childStart = (current.offset - parent.offset) + current.green.textLength
             for childIndex in start..<parent.green.childCount {
-                guard let sibling = storage.arena.realizeChildNode(parent: parent, childIndex: childIndex) else {
+                let childGreen = parent.green.child(at: childIndex)
+                defer {
+                    childStart = childStart + childGreen.textLength
+                }
+                guard case .node = childGreen,
+                      let sibling = storage.arena.realizeChildNode(
+                        parent: parent,
+                        childIndex: childIndex,
+                        childStartOffset: childStart
+                      )
+                else {
                     continue
                 }
                 let cursor = SyntaxNodeCursor(storage: storage, record: sibling)
@@ -842,8 +969,20 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
             guard current.indexInParent > 0 else {
                 return
             }
+            var childEnd = current.offset - parent.offset
             for childIndex in stride(from: Int(current.indexInParent) - 1, through: 0, by: -1) {
-                guard let sibling = storage.arena.realizeChildNode(parent: parent, childIndex: childIndex) else {
+                let childGreen = parent.green.child(at: childIndex)
+                let childStart = childEnd - childGreen.textLength
+                defer {
+                    childEnd = childStart
+                }
+                guard case .node = childGreen,
+                      let sibling = storage.arena.realizeChildNode(
+                        parent: parent,
+                        childIndex: childIndex,
+                        childStartOffset: childStart
+                      )
+                else {
                     continue
                 }
                 let cursor = SyntaxNodeCursor(storage: storage, record: sibling)
@@ -874,8 +1013,17 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
             guard start < parent.green.childCount else {
                 return
             }
+            var childStart = (current.offset - parent.offset) + current.green.textLength
             for childIndex in start..<parent.green.childCount {
-                _ = try withRawChildOrToken(parentRecord: parent, at: childIndex) { element in
+                let childGreen = parent.green.child(at: childIndex)
+                defer {
+                    childStart = childStart + childGreen.textLength
+                }
+                _ = try withRawChildOrToken(
+                    parentRecord: parent,
+                    at: childIndex,
+                    childStartOffset: childStart
+                ) { element in
                     try body(element)
                 }
             }
@@ -883,8 +1031,18 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
             guard current.indexInParent > 0 else {
                 return
             }
+            var childEnd = current.offset - parent.offset
             for childIndex in stride(from: Int(current.indexInParent) - 1, through: 0, by: -1) {
-                _ = try withRawChildOrToken(parentRecord: parent, at: childIndex) { element in
+                let childGreen = parent.green.child(at: childIndex)
+                let childStart = childEnd - childGreen.textLength
+                defer {
+                    childEnd = childStart
+                }
+                _ = try withRawChildOrToken(
+                    parentRecord: parent,
+                    at: childIndex,
+                    childStartOffset: childStart
+                ) { element in
                     try body(element)
                 }
             }
@@ -895,8 +1053,18 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
         _ body: (borrowing SyntaxElementCursor<Lang>) throws -> Void
     ) rethrows {
         let count = childOrTokenCount
+        let record = record
+        var childStart = TextSize.zero
         for index in 0..<count {
-            _ = try withChildOrToken(at: index) { element in
+            let child = record.green.child(at: index)
+            defer {
+                childStart = childStart + child.textLength
+            }
+            _ = try withRawChildOrToken(
+                parentRecord: record,
+                at: index,
+                childStartOffset: childStart
+            ) { element in
                 try body(element)
             }
         }
@@ -927,8 +1095,19 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
         }
 
         let record = record
+        var childStart = TextSize.zero
         for childIndex in 0..<record.green.childCount {
-            guard let childRecord = storage.arena.realizeChildNode(parent: record, childIndex: childIndex) else {
+            let childGreen = record.green.child(at: childIndex)
+            defer {
+                childStart = childStart + childGreen.textLength
+            }
+            guard case .node = childGreen,
+                  let childRecord = storage.arena.realizeChildNode(
+                    parent: record,
+                    childIndex: childIndex,
+                    childStartOffset: childStart
+                  )
+            else {
                 continue
             }
             let child = SyntaxNodeCursor(storage: storage, record: childRecord)
@@ -949,10 +1128,20 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
             try body(element)
         }
 
+        var childStart = TextSize.zero
         for childIndex in 0..<record.green.childCount {
-            switch record.green.child(at: childIndex) {
+            let child = record.green.child(at: childIndex)
+            defer {
+                childStart = childStart + child.textLength
+            }
+
+            switch child {
             case .node:
-                guard let childRecord = storage.arena.realizeChildNode(parent: record, childIndex: childIndex) else {
+                guard let childRecord = storage.arena.realizeChildNode(
+                    parent: record,
+                    childIndex: childIndex,
+                    childStartOffset: childStart
+                ) else {
                     continue
                 }
                 let node = SyntaxNodeCursor(storage: storage, record: childRecord)
@@ -965,7 +1154,7 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
                     storage: storage,
                     parentRecord: record,
                     childIndex: UInt32(childIndex),
-                    offset: record.offset + record.green.childStartOffset(at: childIndex),
+                    offset: record.offset + childStart,
                     green: token
                 )
                 let element = SyntaxElementCursor<Lang>.token(token)
@@ -1002,8 +1191,19 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
         let enterControl = try body(enterEvent)
         switch enterControl {
         case .continue:
+            var childStart = TextSize.zero
             for childIndex in 0..<record.green.childCount {
-                guard let childRecord = storage.arena.realizeChildNode(parent: record, childIndex: childIndex) else {
+                let childGreen = record.green.child(at: childIndex)
+                defer {
+                    childStart = childStart + childGreen.textLength
+                }
+                guard case .node = childGreen,
+                      let childRecord = storage.arena.realizeChildNode(
+                        parent: record,
+                        childIndex: childIndex,
+                        childStartOffset: childStart
+                      )
+                else {
                     continue
                 }
                 let child = SyntaxNodeCursor(storage: storage, record: childRecord)
@@ -1029,11 +1229,12 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
 
     private borrowing func walkTokenPreorder(
         at childIndex: Int,
+        childStartOffset: TextSize,
         token: GreenToken<Lang>,
         parentRecord: RedNodeRecord<Lang>,
         _ body: (borrowing SyntaxElementWalkEvent<Lang>) throws -> TraversalControl
     ) rethrows -> TraversalControl {
-        let childOffset = parentRecord.offset + parentRecord.green.childStartOffset(at: childIndex)
+        let childOffset = parentRecord.offset + childStartOffset
         let enterToken = SyntaxTokenCursor(
             storage: storage,
             parentRecord: parentRecord,
@@ -1077,10 +1278,20 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
         let enterControl = try body(enterEvent)
         switch enterControl {
         case .continue:
+            var childStart = TextSize.zero
             for childIndex in 0..<record.green.childCount {
-                switch record.green.child(at: childIndex) {
+                let child = record.green.child(at: childIndex)
+                defer {
+                    childStart = childStart + child.textLength
+                }
+
+                switch child {
                 case .node:
-                    guard let childRecord = storage.arena.realizeChildNode(parent: record, childIndex: childIndex) else {
+                    guard let childRecord = storage.arena.realizeChildNode(
+                        parent: record,
+                        childIndex: childIndex,
+                        childStartOffset: childStart
+                    ) else {
                         continue
                     }
                     let child = SyntaxNodeCursor(storage: storage, record: childRecord)
@@ -1088,7 +1299,13 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
                         return .stop
                     }
                 case .token(let token):
-                    if try walkTokenPreorder(at: childIndex, token: token, parentRecord: record, body) == .stop {
+                    if try walkTokenPreorder(
+                        at: childIndex,
+                        childStartOffset: childStart,
+                        token: token,
+                        parentRecord: record,
+                        body
+                    ) == .stop {
                         return .stop
                     }
                 }
@@ -1119,17 +1336,25 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
         }
 
         let record = record
+        var childStart = TextSize.zero
         for index in 0..<record.green.childCount {
-            let childStart = record.offset + record.green.childStartOffset(at: index)
             let child = record.green.child(at: index)
-            let childRange = TextRange(start: childStart, length: child.textLength)
+            let absoluteChildStart = record.offset + childStart
+            let childRange = TextRange(start: absoluteChildStart, length: child.textLength)
+            defer {
+                childStart = childStart + child.textLength
+            }
             if let range, !childRange.intersects(range), !childRange.isEmpty {
                 continue
             }
 
             switch child {
             case .node:
-                guard let childRecord = storage.arena.realizeChildNode(parent: record, childIndex: index) else {
+                guard let childRecord = storage.arena.realizeChildNode(
+                    parent: record,
+                    childIndex: index,
+                    childStartOffset: childStart
+                ) else {
                     continue
                 }
                 let cursor = SyntaxNodeCursor(storage: storage, record: childRecord)
@@ -1139,7 +1364,7 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
                     storage: storage,
                     parentRecord: record,
                     childIndex: UInt32(index),
-                    offset: childStart,
+                    offset: absoluteChildStart,
                     green: token
                 )
                 try body(cursor)
@@ -1156,10 +1381,14 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
         }
 
         let record = record
+        var childStart = TextSize.zero
         for index in 0..<record.green.childCount {
-            let childStart = record.offset + record.green.childStartOffset(at: index)
             let child = record.green.child(at: index)
-            let childRange = TextRange(start: childStart, length: child.textLength)
+            let absoluteChildStart = record.offset + childStart
+            let childRange = TextRange(start: absoluteChildStart, length: child.textLength)
+            defer {
+                childStart = childStart + child.textLength
+            }
             let contains = childRange.contains(offset)
                 || (childRange.isEmpty && childRange.start == offset)
             guard contains else {
@@ -1168,7 +1397,11 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
 
             switch child {
             case .node:
-                guard let childRecord = storage.arena.realizeChildNode(parent: record, childIndex: index) else {
+                guard let childRecord = storage.arena.realizeChildNode(
+                    parent: record,
+                    childIndex: index,
+                    childStartOffset: childStart
+                ) else {
                     continue
                 }
                 let cursor = SyntaxNodeCursor(storage: storage, record: childRecord)
@@ -1178,7 +1411,7 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
                     storage: storage,
                     parentRecord: record,
                     childIndex: UInt32(index),
-                    offset: childStart,
+                    offset: absoluteChildStart,
                     green: token
                 )
                 return try body(cursor)
@@ -1196,17 +1429,25 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
         }
 
         let record = record
+        var childStart = TextSize.zero
         for index in 0..<record.green.childCount {
-            let childStart = record.offset + record.green.childStartOffset(at: index)
             let child = record.green.child(at: index)
-            let childRange = TextRange(start: childStart, length: child.textLength)
+            let absoluteChildStart = record.offset + childStart
+            let childRange = TextRange(start: absoluteChildStart, length: child.textLength)
+            defer {
+                childStart = childStart + child.textLength
+            }
             guard childRange.contains(range) else {
                 continue
             }
 
             switch child {
             case .node:
-                guard let childRecord = storage.arena.realizeChildNode(parent: record, childIndex: index) else {
+                guard let childRecord = storage.arena.realizeChildNode(
+                    parent: record,
+                    childIndex: index,
+                    childStartOffset: childStart
+                ) else {
                     continue
                 }
                 let cursor = SyntaxNodeCursor(storage: storage, record: childRecord)
@@ -1216,7 +1457,7 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
                     storage: storage,
                     parentRecord: record,
                     childIndex: UInt32(index),
-                    offset: childStart,
+                    offset: absoluteChildStart,
                     green: token
                 )
                 let element = SyntaxElementCursor<Lang>.token(cursor)
@@ -1393,6 +1634,7 @@ public struct SyntaxTokenCursor<Lang: SyntaxLanguage>: ~Copyable {
 
     private borrowing func withSiblingOrToken<R>(
         at siblingIndex: Int,
+        childStartOffset: TextSize? = nil,
         _ body: (borrowing SyntaxElementCursor<Lang>) throws -> R
     ) rethrows -> R? {
         let parentRecord = parentRecord
@@ -1402,7 +1644,11 @@ public struct SyntaxTokenCursor<Lang: SyntaxLanguage>: ~Copyable {
 
         switch parentRecord.green.child(at: siblingIndex) {
         case .node:
-            guard let child = storage.arena.realizeChildNode(parent: parentRecord, childIndex: siblingIndex) else {
+            guard let child = storage.arena.realizeChildNode(
+                parent: parentRecord,
+                childIndex: siblingIndex,
+                childStartOffset: childStartOffset
+            ) else {
                 return nil
             }
             let node = SyntaxNodeCursor(storage: storage, record: child)
@@ -1413,7 +1659,7 @@ public struct SyntaxTokenCursor<Lang: SyntaxLanguage>: ~Copyable {
                 storage: storage,
                 parentRecord: parentRecord,
                 childIndex: UInt32(siblingIndex),
-                offset: parentRecord.offset + parentRecord.green.childStartOffset(at: siblingIndex),
+                offset: parentRecord.offset + (childStartOffset ?? parentRecord.green.childStartOffset(at: siblingIndex)),
                 green: token
             )
             let element = SyntaxElementCursor<Lang>.token(token)
@@ -1424,13 +1670,20 @@ public struct SyntaxTokenCursor<Lang: SyntaxLanguage>: ~Copyable {
     public borrowing func withNextSiblingOrToken<R>(
         _ body: (borrowing SyntaxElementCursor<Lang>) throws -> R
     ) rethrows -> R? {
-        try withSiblingOrToken(at: Int(childIndex) + 1, body)
+        let nextStart = (offset - parentRecord.offset) + green.textLength
+        return try withSiblingOrToken(at: Int(childIndex) + 1, childStartOffset: nextStart, body)
     }
 
     public borrowing func withPreviousSiblingOrToken<R>(
         _ body: (borrowing SyntaxElementCursor<Lang>) throws -> R
     ) rethrows -> R? {
-        try withSiblingOrToken(at: Int(childIndex) - 1, body)
+        let siblingIndex = Int(childIndex) - 1
+        guard siblingIndex >= 0 else {
+            return nil
+        }
+        let sibling = parentRecord.green.child(at: siblingIndex)
+        let siblingStart = (offset - parentRecord.offset) - sibling.textLength
+        return try withSiblingOrToken(at: siblingIndex, childStartOffset: siblingStart, body)
     }
 
     public borrowing func forEachAncestor(
@@ -1472,8 +1725,13 @@ public struct SyntaxTokenCursor<Lang: SyntaxLanguage>: ~Copyable {
             guard start < parentRecord.green.childCount else {
                 return
             }
+            var childStart = (offset - parentRecord.offset) + green.textLength
             for siblingIndex in start..<parentRecord.green.childCount {
-                _ = try withSiblingOrToken(at: siblingIndex) { element in
+                let child = parentRecord.green.child(at: siblingIndex)
+                defer {
+                    childStart = childStart + child.textLength
+                }
+                _ = try withSiblingOrToken(at: siblingIndex, childStartOffset: childStart) { element in
                     try body(element)
                 }
             }
@@ -1481,8 +1739,14 @@ public struct SyntaxTokenCursor<Lang: SyntaxLanguage>: ~Copyable {
             guard childIndex > 0 else {
                 return
             }
+            var childEnd = offset - parentRecord.offset
             for siblingIndex in stride(from: Int(childIndex) - 1, through: 0, by: -1) {
-                _ = try withSiblingOrToken(at: siblingIndex) { element in
+                let child = parentRecord.green.child(at: siblingIndex)
+                let childStart = childEnd - child.textLength
+                defer {
+                    childEnd = childStart
+                }
+                _ = try withSiblingOrToken(at: siblingIndex, childStartOffset: childStart) { element in
                     try body(element)
                 }
             }
