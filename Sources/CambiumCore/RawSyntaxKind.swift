@@ -24,6 +24,13 @@ public struct RawSyntaxKind:
     }
 }
 
+public protocol SyntaxKind: RawRepresentable, Hashable, Sendable where RawValue == UInt32 {
+    static func rawKind(for kind: Self) -> RawSyntaxKind
+    static func kind(for raw: RawSyntaxKind) -> Self
+    static func staticText(for kind: Self) -> StaticString?
+    static func name(for kind: Self) -> String
+}
+
 public protocol SyntaxLanguage: Sendable {
     associatedtype Kind: RawRepresentable & Hashable & Sendable where Kind.RawValue == UInt32
 
@@ -85,5 +92,23 @@ public extension SyntaxLanguage where Kind == RawSyntaxKind {
 
     static func kind(for raw: RawSyntaxKind) -> Kind {
         raw
+    }
+}
+
+public extension SyntaxLanguage where Kind: SyntaxKind {
+    static func rawKind(for kind: Kind) -> RawSyntaxKind {
+        Kind.rawKind(for: kind)
+    }
+
+    static func kind(for raw: RawSyntaxKind) -> Kind {
+        Kind.kind(for: raw)
+    }
+
+    static func staticText(for kind: Kind) -> StaticString? {
+        Kind.staticText(for: kind)
+    }
+
+    static func name(for kind: Kind) -> String {
+        Kind.name(for: kind)
     }
 }

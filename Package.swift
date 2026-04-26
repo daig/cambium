@@ -2,6 +2,7 @@
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
+import CompilerPluginSupport
 
 let package = Package(
     name: "cambium",
@@ -45,6 +46,13 @@ let package = Package(
             name: "CambiumTesting",
             targets: ["CambiumTesting"]
         ),
+        .library(
+            name: "CambiumSyntaxMacros",
+            targets: ["CambiumSyntaxMacros"]
+        ),
+    ],
+    dependencies: [
+        .package(url: "https://github.com/swiftlang/swift-syntax.git", exact: "603.0.0"),
     ],
     targets: [
         .target(
@@ -93,6 +101,24 @@ let package = Package(
             name: "CambiumTesting",
             dependencies: ["CambiumCore"]
         ),
+        .target(
+            name: "CambiumSyntaxMacros",
+            dependencies: [
+                "CambiumCore",
+                "CambiumSyntaxMacrosPlugin",
+            ]
+        ),
+        .macro(
+            name: "CambiumSyntaxMacrosPlugin",
+            dependencies: [
+                "CambiumCore",
+                .product(name: "SwiftCompilerPlugin", package: "swift-syntax"),
+                .product(name: "SwiftDiagnostics", package: "swift-syntax"),
+                .product(name: "SwiftSyntax", package: "swift-syntax"),
+                .product(name: "SwiftSyntaxBuilder", package: "swift-syntax"),
+                .product(name: "SwiftSyntaxMacros", package: "swift-syntax"),
+            ]
+        ),
         .testTarget(
             name: "CambiumCoreTests",
             dependencies: [
@@ -103,6 +129,17 @@ let package = Package(
                 "CambiumASTSupport",
                 "CambiumOwnedTraversal",
                 "CambiumSerialization",
+            ]
+        ),
+        .testTarget(
+            name: "CambiumSyntaxMacrosTests",
+            dependencies: [
+                "CambiumBuilder",
+                "CambiumCore",
+                "CambiumSyntaxMacros",
+                "CambiumSyntaxMacrosPlugin",
+                .product(name: "SwiftSyntaxMacros", package: "swift-syntax"),
+                .product(name: "SwiftSyntaxMacrosTestSupport", package: "swift-syntax"),
             ]
         ),
     ],
