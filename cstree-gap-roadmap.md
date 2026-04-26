@@ -15,8 +15,9 @@ parser-neutral infrastructure, and immutable trees updated through replacement.
 - Homogeneous CST tagged by `RawSyntaxKind`.
 - Language-specific `SyntaxLanguage` policy and derived `SyntaxKind` support.
 - Green nodes and tokens with structural hashes and text lengths.
-- Local token interning and token text resolvers.
-- Green tree builder with checkpoints, retroactive wrapping, and static tokens.
+- Local token interning and immutable `TokenTextSnapshot` values for finished trees.
+- Green tree builder with checkpoints, retroactive wrapping, static tokens, and
+  cache-preserving `finish()`.
 - Green node/token cache with local and shared cache entry points.
 - Lazy persistent red arena with shared syntax tree storage, stable red records,
   and lock-free reads for realized children.
@@ -24,11 +25,13 @@ parser-neutral infrastructure, and immutable trees updated through replacement.
 - Borrowed core traversal for first/last children, node/token siblings,
   ancestors, descendants, and preorder walk events.
 - Byte-first `SyntaxText` chunk iteration, search, slicing, and equality.
-- Anchors for cross-version node resolution.
+- Witness-based cross-version change descriptions for replacement and
+  incremental parse reuse.
 - Node replacement by rebuilding the ancestor path.
 - Green snapshot serialization and decoding.
 - Basic sidecar metadata and external analysis cache helpers.
-- Skeletal incremental parse session, text edits, range mapping, and reuse oracle.
+- Skeletal incremental parse session, text edits, range mapping, reuse oracle,
+  and accepted-reuse logging.
 
 ## Priority 1: Traversal API Completeness
 
@@ -110,11 +113,15 @@ are central for incremental lexing, selections, and formatting.
 Incremental work:
 
 1. Add `staticText` convenience on token cursors and handles.
-2. Add token text-key exposure where it is safe to expose interned identity.
-3. Add cheap token text equality helpers.
-4. Add previous/next token traversal across subtree boundaries.
-5. Add token replacement by rebuilding the ancestor path.
-6. Add element replacement for callers that operate on `SyntaxElementCursor`.
+2. Add `TokenAtOffset` with `none`, `single`, and `between` cases so exact
+   token-boundary queries are unambiguous.
+3. Validate or reject static-token kinds passed through dynamic
+   `builder.token(_:text:)` APIs.
+4. Add token text-key exposure where it is safe to expose interned identity.
+5. Add cheap token text equality helpers.
+6. Add previous/next token traversal across subtree boundaries.
+7. Add token replacement by rebuilding the ancestor path.
+8. Add element replacement for callers that operate on `SyntaxElementCursor`.
 
 Acceptance criteria:
 
@@ -177,7 +184,8 @@ Incremental work:
 2. Add `trySet` semantics for "set only if absent".
 3. Decide whether node-handle convenience methods should wrap sidecar stores.
 4. Document metadata lifetime relative to `TreeID`.
-5. Add pruning helpers keyed by tree identity or anchor resolution.
+5. Add pruning helpers keyed by tree identity and by external witness-driven
+   identity trackers.
 6. Decide whether any metadata should participate in serialization.
 
 Acceptance criteria:
@@ -235,8 +243,8 @@ serialization.
 Incremental work:
 
 1. Document the current snapshot format and compatibility expectations.
-2. Decide whether red tree identity, anchors, metadata, or diagnostics should be
-   serializable.
+2. Decide whether red tree identity, witness history, metadata, or diagnostics
+   should be serializable.
 3. Add explicit version migration policy.
 4. Add fuzz or malformed-input tests for decoder robustness.
 

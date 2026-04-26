@@ -1,21 +1,21 @@
 # Witness-Based Cross-Tree Identity
 
 **Document date:** 2026-04-25
-**Status:** Architectural decision; supersedes the `SyntaxAnchor` design from `swift-native-cst-architecture.md` §18
-**Audience:** Lead engineer planning the implementation
+**Status:** Implemented architectural decision; supersedes the `SyntaxAnchor` design from `swift-native-cst-architecture.md` §18
+**Audience:** Cambium maintainers and consumers building identity trackers
 **Resolves:** audit issue A7 in `cstree-audit-findings.md`
 
 ---
 
 ## 1. Executive summary
 
-Cambium currently provides cross-tree node identity through `SyntaxAnchor` and `SharedSyntaxTree.resolve(_:_:)`: a stored fingerprint (path, range, kind, structural hash) plus a four-step retrieval ladder that tries each fingerprint dimension against the new tree, falling back to a nearby-match heuristic with a hardcoded 64-byte tolerance.
+Cambium previously provided cross-tree node identity through `SyntaxAnchor` and `SharedSyntaxTree.resolve(_:_:)`: a stored fingerprint (path, range, kind, structural hash) plus a four-step retrieval ladder that tried each fingerprint dimension against the new tree, falling back to a nearby-match heuristic with a hardcoded 64-byte tolerance.
 
-This design is being replaced. Edits and incremental reparses will return **witnesses** — structural descriptions of what changed — and consumers will translate identities through those witnesses rather than re-discovering them by fingerprint match. Cross-tree identity tracking moves out of `CambiumCore` entirely; it becomes a higher-layer concern that consumes Cambium's witnesses and composes whatever identity model an editor needs.
+That design has been replaced. Edits and incremental reparses return **witnesses** — structural descriptions of what changed — and consumers translate identities through those witnesses rather than re-discovering them by fingerprint match. Cross-tree identity tracking lives outside `CambiumCore`; it is a higher-layer concern that consumes Cambium's witnesses and composes whatever identity model an editor needs.
 
 This mirrors how cstree externalizes incremental computation to salsa: the CST library provides structural primitives, and the consuming framework builds identity-and-memoization on top.
 
-Same-tree identity is not affected. `SyntaxNodeCursor` (borrowed traversal), `SyntaxNodeHandle` (retained, hashable reference), and `SyntaxNodeIdentity` (value-typed identity, no retain) already cover within-tree identity completely. The cleanup is mostly subtractive: remove anchors, add witnesses, document the externalization boundary.
+Same-tree identity is not affected. `SyntaxNodeCursor` (borrowed traversal), `SyntaxNodeHandle` (retained, hashable reference), and `SyntaxNodeIdentity` (value-typed identity, no retain) cover within-tree identity.
 
 ---
 
@@ -389,16 +389,33 @@ The change is structurally contained to a small surface area in three modules (C
 
 ---
 
-## 15. Open questions for the implementation plan
+## 15. Implementation status and remaining questions
 
-The lead engineer's implementation plan should resolve these:
+The initial witness migration has shipped:
 
-1. **Witness type representation.** Sealed enum, marker protocol, or discrete structs? `ReplacementWitness` and `ParseWitness` are different enough that a unified type may not be useful, but a marker protocol could enable generic tooling.
-2. **Compact `ParseWitness` representation.** Array of reuse entries, path-keyed map, or something more structural? See §8.3.
-3. **API surface for `replacing`.** Should it accept handles only, or also raw green-node-at-path? Probably handles only (it's the simplest contract), but the question is worth flagging.
-4. **Interaction with `GreenTreeBuilder.reuseSubtree(_:)`.** This API in the builder is separate from the incremental parse path but related. Currently it doesn't remap interner keys — that's audit issue **A6**, separate but related. The implementation plan should consider whether `reuseSubtree` should emit witnesses too, and how it handles cross-interner reuse.
-5. **Tracker package placement.** Should `CambiumStableID` (or whatever name) live in this repository as a sibling package, or in a downstream consumer? Recommendation: outside this repository. The tracker is the editor framework's concern and its API will be shaped by editor needs more than by Cambium's preferences.
-6. **Migration strategy.** Big-bang removal of anchors plus addition of witnesses, or a deprecation period where both coexist? The codebase is small enough that big-bang is feasible; the question is whether external consumers (which may not yet exist) need a transition.
+1. `ReplacementWitness` and `ReplacementOutcome` live in `CambiumCore`.
+2. `ParseWitness` and `Reuse` live in `CambiumIncremental`.
+3. `SharedSyntaxTree.replacing(_:with:cache:)` accepts `SyntaxNodeHandle`
+   values and returns a `ReplacementResult` containing the new tree and
+   witness.
+4. `GreenTreeBuilder.reuseSubtree(_:)` is token-namespace-aware: it preserves
+   green identity when the source resolver and destination cache share a
+   namespace, and remaps dynamic token keys otherwise.
+5. `SyntaxAnchor` and its resolver path were removed in one migration.
+6. The stable-ID tracker remains intentionally outside this repository.
+
+Remaining design questions:
+
+1. **Compact `ParseWitness` representation.** The current `[Reuse]` array is
+   simple and correct. A path-keyed map, tree-shaped diff, or precomputed
+   translation function may be worth considering if real parsers record many
+   small reuses per parse.
+2. **Raw-path replacement API.** Replacement currently uses handles. A raw
+   green-node-at-path entry point is deferred until a concrete consumer needs
+   it.
+3. **Tracker package placement and policy.** The recommendation remains that a
+   `CambiumStableID`-style tracker live above CambiumCore and be shaped by
+   editor requirements.
 
 ---
 
@@ -437,14 +454,10 @@ Some consumer use cases break the witness chain (loaded from disk, third-party t
 
 ---
 
-## 18. Summary for implementation
+## 18. Summary
 
-The work is focused and bounded:
-
-1. Add two witness types in their respective modules
-2. Update two API entry points (`replacing`, `parse`) to return them
-3. Remove `SyntaxAnchor`, the resolver, the `replacing(anchor:)` overloads, and the `anchor` fields in `Diagnostic` and `AnalysisCacheKey`
-4. Update tests to use handles for same-tree identity and witnesses for cross-tree
-5. Update or remove documentation that references anchors (chiefly §18 of the original architecture document)
-
-The lead engineer's implementation plan should sequence these changes, resolve the open questions in §15, and identify any additional surface that needs to evolve to land cleanly. Once the witness primitives are stable, the higher-layer identity tracker can be built independently — that work is not part of this document and not part of `CambiumCore`.
+The witness migration is complete in Cambium itself: anchors are gone, same-tree
+identity is handled by handles/identities, and cross-tree identity is
+externalized through replacement and parse witnesses. Future work is above this
+layer: mature parser integration, compact parse-witness representations if
+needed, and an editor-facing stable-ID tracker built on these primitives.

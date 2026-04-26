@@ -237,8 +237,19 @@ Spec §25.4 prescribes "maximum bytes; maximum entries; eviction strategy; instr
 
 ## Recommended priority
 
-1. **B4** — benchmark repeated random lookups on wide nodes before adding an offset table.
-2. **C-series spec fixes** — update arch doc to make `TokenAtOffset.Between`, `missing`-as-distinct-storage, and lock-free read goals explicit, so future contributors don't re-derive the wrong constraints.
-3. **D-series and roadmap** — most of D maps onto roadmap priorities 2/3; D1 and D3 should be added.
+1. **D3** — validate or reject static-token kinds passed through
+   `builder.token(_:text:)`. This is the remaining small correctness trap: the
+   dynamic-token path can currently build a static-kind token with arbitrary
+   text.
+2. **D1/C3** — add `TokenAtOffset` with `none`, `single`, and `between` so IDE
+   cursor-boundary queries are represented directly.
+3. **Incremental reuse oracle maturity** — upgrade matching beyond start
+   offset/kind to account for edit invalidation, ranges, and green hashes, then
+   document parser acceptance as the authoritative reuse signal.
+4. **B3/C6** — replace dictionary-order cache eviction and decide whether to
+   bias caching toward small nodes as cstree does.
+5. **B2/B4/B5** — benchmark before changing: cold red-realization locking, wide
+   node offset tables, and ARC traffic from copyable green wrappers are
+   performance proof items, not current correctness bugs.
 
 Cambium's *shape* matches the architecture spec well — green/red split, noncopyable builder, witness-based cross-tree identity, replacement, serialization, macro-derived kinds. The original silent correctness bugs in the A-series are now resolved; remaining work is mostly API completeness, documentation alignment, and performance validation.
