@@ -18,7 +18,8 @@ parser-neutral infrastructure, and immutable trees updated through replacement.
 - Local token interning and token text resolvers.
 - Green tree builder with checkpoints, retroactive wrapping, and static tokens.
 - Green node/token cache with local and shared cache entry points.
-- Lazy persistent red arena with shared syntax tree storage.
+- Lazy persistent red arena with shared syntax tree storage, stable red records,
+  and lock-free reads for realized children.
 - Borrowed node/token cursors and copyable node/token handles.
 - Borrowed core traversal for first/last children, node/token siblings,
   ancestors, descendants, and preorder walk events.
@@ -252,9 +253,14 @@ Cambium's design depends on safe concurrent traversal and predictable allocation
 behavior. Several types use `@unchecked Sendable`, so tests and benchmarks need
 to carry more of the proof burden.
 
+Status: the first red-arena correctness slice is complete. Realized red records
+are now immutable arena-owned objects, cursor reads no longer acquire the arena
+mutex, and concurrent lazy realization is covered by focused tests. Broader CI
+sanitizer coverage and performance benchmarks remain open.
+
 Incremental work:
 
-1. Add concurrent traversal stress tests that force red realization races.
+1. Add broader concurrent traversal stress tests beyond red child realization.
 2. Add Thread Sanitizer test runs in CI or documented local commands.
 3. Benchmark cold and warm red traversal.
 4. Benchmark builder/cache behavior on large and repeated subtrees.
@@ -279,7 +285,7 @@ Suggested next slices:
 3. Owned traversal conveniences for selected borrowed traversal helpers.
 4. Incremental reuse oracle correctness upgrade.
 5. Debug tree rendering API and getting-started example.
-6. Concurrency stress tests for red realization.
+6. Broader concurrency stress tests for shared caches, interners, and traversal.
 
 Each slice should include focused tests and avoid changing parser-neutral core
 contracts unless the new API has a clear downstream use case.

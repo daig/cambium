@@ -2,11 +2,24 @@
 
 Cambium implements the green/red separation, builder, interner, anchors, and replacement faithfully. The biggest divergences are not where the roadmap currently looks — they are in the red layer's hot path, the green text-offset arithmetic, and a handful of subtle bugs in code paths the test suite does not exercise. Below, "**arch**" is `swift-native-cst-architecture.md`, line numbers pin the original.
 
+Status update: A1/B1/B6 are now resolved by the lock-free red cursor read
+refactor. The remaining critical correctness/performance concerns start with
+A2/A3 and the silent correctness bugs in A5/A6/A8/A9.
+
 ---
 
 ## A. Critical bugs (real, not in roadmap)
 
-### A1. The arena mutex turns every cursor read into an exclusive lock acquisition
+### A1. Resolved: The arena mutex turned every cursor read into an exclusive lock acquisition
+
+**Status:** fixed. Red records are now stable arena-owned reference objects;
+node and token cursors carry unretained record references; copyable handles carry
+strong record references; and child slots publish record pointers with
+acquire/release atomics. The arena mutex remains for slow-path record allocation
+and slot publication only. Focused handle-lifetime and concurrent lazy-realization
+tests were added.
+
+**Original finding:**
 
 **Where:** `Sources/CambiumCore/SyntaxTree.swift:122–229` (`RedArena`), `:445–447` (`SyntaxNodeCursor.record`).
 
@@ -22,7 +35,10 @@ So the `Atomic<UInt64>` slot is loaded under the exclusive mutex. The atomicity 
 
 **Why this matters:** arch §21.1 promises "concurrent traversal of one shared tree is safe", §21.2 lists `node.kind`, `node.textRange`, `node.forEachChild`, `token.text`, `root.token(at:)` as APIs that "must not actor-hop", and §13.4 explicitly described an *atomic-acquire fast path* that bypasses the slow lock. The implementation contradicts all three: two threads traversing one `SharedSyntaxTree` fully serialise on a single `Mutex`. Even single-threaded reads pay the lock fee. cstree achieves true read-parallelism via per-child `parking_lot::RwLock` (cstree `syntax/node.rs:264`), which lets readers proceed in parallel and only takes the write lock on the very first realisation.
 
-**Fix sketch:** keep the arena `Mutex` for `records.append` / chunk allocation only. Cache `RedNodeRecord` snapshots on each cursor at construction (records are immutable after publication) so property reads never lock. Use the existing `Atomic<UInt64>` slot loads on the fast path with `.acquiring` ordering, and only enter the mutex when a slot reads zero. This was the architecture spec's design.
+**Implemented fix:** the arena keeps records strongly for tree lifetime and
+child slots now store non-owning record pointers. Publication initializes the
+record, appends it to arena-owned storage, then release-stores the pointer.
+Readers acquire-load and read immutable fields directly.
 
 ### A2. `GreenNode.childStartOffset` is O(N), called O(N²) per node iteration
 
@@ -107,9 +123,11 @@ cstree's interner returns `InternerError::KeySpaceExhausted` (`interning/default
 
 ## B. Major architectural deviations from the spec
 
-### B1. `Atomic<UInt64>` slots are decorative
+### B1. Resolved: `Atomic` slots were decorative
 
-Spec §13.4 fast path: atomic-acquire load → if non-zero, return. Implementation: load is *inside* `state.withLock`. The `Synchronization.Atomic` primitive is used but the contract it enables (lock-free reads) is not. See A1.
+Spec §13.4 fast path: atomic-acquire load → if non-zero, return. The A1 fix
+restores that contract for realized child reads: the fast path acquire-loads
+the slot before entering the arena mutex.
 
 ### B2. No striped or per-parent locks
 
@@ -127,9 +145,9 @@ Spec §25.3 sketches `ChildOffsetTable { let childStarts: UnsafeBufferPointer<Te
 
 Spec §11.1 allowed copyable green refs "as long as the implementation keeps copy cost predictable", with an escape hatch to a `GreenStore + GreenID` arena model. `GreenNode` and `GreenToken` are structs over class storage, so `child(at:)` returning `GreenElement<Lang>` does an ARC retain on every iteration. In tight loops this is per-step ARC traffic — exactly what arch §3.2 wanted to avoid. The escape hatch was not taken; whether it's needed depends on benchmarks not yet run (roadmap Priority 10).
 
-### B6. Cursor types lock the arena instead of caching the record
+### B6. Resolved: Cursor types locked the arena instead of caching the record
 
-Spec §14.1's "implementation sketch" explicitly mentions "unowned/unsafe pointer to SyntaxTreeStorage / RedNodeID". Cambium followed that literally. But because RedNodeRecord is locked behind `Mutex<State>`, every property access pays the lock. A simple cache (read once at cursor construction, reuse on every property access) would convert reads to direct struct field loads. Records never change after publication, so the cache stays valid for the cursor's lifetime.
+Spec §14.1's "implementation sketch" explicitly mentions "unowned/unsafe pointer to SyntaxTreeStorage / RedNodeID". Cambium followed that literally. The A1 fix now carries a stable record reference in each cursor, so property reads are direct immutable field reads rather than arena lookups.
 
 ---
 
@@ -187,7 +205,7 @@ Spec §25.4 prescribes "maximum bytes; maximum entries; eviction strategy; instr
 
 ## E. Test coverage gaps that mask the bugs above
 
-- **No concurrency tests at all.** A1, A6, B1, B2 are completely uncovered. Arch §28 #8/#9 listed "Concurrent traversal tests" and "Thread Sanitizer suite" as required.
+- **Concurrency coverage is still incomplete.** A1/B1 now have focused concurrent lazy-realization coverage, but A6, shared interner/cache contention, and broader Thread Sanitizer coverage still need CI-level follow-through. Arch §28 #8/#9 listed "Concurrent traversal tests" and "Thread Sanitizer suite" as required.
 - **No `missingToken(.plus)`-style test.** A5 hides because every test uses `.missing` (no static text).
 - **No cross-interner `reuseSubtree` test.** A6 hides because tests don't reuse a subtree from a tree with a different interner.
 - **No wide-node tests.** A2 / A3 quadratic regression invisible — every test uses small trees (under ~10 children).
@@ -200,11 +218,10 @@ Spec §25.4 prescribes "maximum bytes; maximum entries; eviction strategy; instr
 
 ## Recommended priority
 
-1. **A1** (lock everywhere) — single biggest concurrency/perf regression, undermines a load-bearing arch claim. Fix before any benchmark suite is meaningful.
-2. **A2 + A3 + B4** (childStartOffset / childCount / no offset table) — these compound; one fix (cache nodeChildCount in header, accumulate offsets in iterators, optional offset table) addresses all three.
-3. **A5, A6, A8, A9** — silent correctness bugs that will eventually bite real users.
-4. **A4, A7, A10** — operational gaps that limit incremental parsing usefulness.
-5. **C-series spec fixes** — update arch doc to make `TokenAtOffset.Between`, `missing`-as-distinct-storage, and lock-free read goals explicit, so future contributors don't re-derive the wrong constraints.
-6. **D-series and roadmap** — most of D maps onto roadmap priorities 2/3; D1, D2, D3 should be added.
+1. **A2 + A3 + B4** (childStartOffset / childCount / no offset table) — these compound; one fix (cache nodeChildCount in header, accumulate offsets in iterators, optional offset table) addresses all three.
+2. **A5, A6, A8, A9** — silent correctness bugs that will eventually bite real users.
+3. **A4, A7, A10** — operational gaps that limit incremental parsing usefulness.
+4. **C-series spec fixes** — update arch doc to make `TokenAtOffset.Between`, `missing`-as-distinct-storage, and lock-free read goals explicit, so future contributors don't re-derive the wrong constraints.
+5. **D-series and roadmap** — most of D maps onto roadmap priorities 2/3; D1, D2, D3 should be added.
 
-Cambium's *shape* matches the architecture spec well — green/red split, noncopyable builder, anchors, replacement, serialization, macro-derived kinds. Where it diverges is mostly invisible from the type signatures (A1, A2, A3) and from happy-path tests (A5, A6). A focused performance + correctness pass on the red layer would close the largest gaps with the spec without re-architecting.
+Cambium's *shape* matches the architecture spec well — green/red split, noncopyable builder, anchors, replacement, serialization, macro-derived kinds. Where it still diverges is mostly invisible from the type signatures (A2, A3) and from happy-path tests (A5, A6). A focused performance + correctness pass on child offset/count behavior and the remaining silent correctness bugs would close the largest gaps with the spec without re-architecting.

@@ -366,6 +366,66 @@ private func describeElementWalkEvent(_ event: borrowing SyntaxElementWalkEvent<
     #expect(tokens[4].withCursor { $0.makeString() } == "right")
 }
 
+@Test func redTraversalHandlesSurviveBorrowedCursorClosures() throws {
+    let tree = try makeTraversalTree()
+
+    let handles = tree.withRoot { root in
+        let node = root.withDescendant(atPath: [2, 2]) { child in
+            child.makeHandle()
+        }!
+        let token = root.withToken(at: 8) { token in
+            token.makeHandle()
+        }!
+        return (node, token)
+    }
+
+    #expect(handles.0.withCursor { $0.makeString() } == "c + d")
+    #expect(handles.1.withCursor { $0.makeString() } == "d")
+    #expect(handles.1.withCursor { token in
+        token.withParent { parent in
+            parent.makeString()
+        }
+    } == "c + d")
+}
+
+@Test func redTraversalSupportsConcurrentLazyRealization() async throws {
+    let tree = try makeTraversalTree()
+    let shared = tree.share()
+
+    let results = await withTaskGroup(of: String.self) { group in
+        for _ in 0..<32 {
+            group.addTask {
+                shared.withRoot { root in
+                    var labels: [String] = []
+                    root.forEachDescendantOrToken(includingSelf: true) { element in
+                        labels.append(describeElement(element))
+                    }
+                    let token = root.withToken(at: 8) { token in
+                        token.makeString()
+                    } ?? "nil"
+                    let path = root.withDescendant(atPath: [2, 2]) { child in
+                        child.childIndexPath().map(String.init).joined(separator: ".")
+                    } ?? "nil"
+                    labels.append("token:\(token)")
+                    labels.append("path:\(path)")
+                    return labels.joined(separator: "|")
+                }
+            }
+        }
+
+        var results: [String] = []
+        for await result in group {
+            results.append(result)
+        }
+        return results
+    }
+
+    #expect(results.count == 32)
+    #expect(Set(results).count == 1)
+    #expect(results.first?.contains("token:d") == true)
+    #expect(results.first?.contains("path:2.2") == true)
+}
+
 @Test func traversalChildHelpersDistinguishNodesAndTokens() throws {
     let tree = try makeTraversalTree()
     let labels = tree.withRoot { root in
