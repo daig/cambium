@@ -966,11 +966,20 @@ public extension SharedSyntaxTree {
             replacement: remappedReplacement,
             cache: &cache
         )
-        let overlay = OverlayTokenResolver(
-            base: resolver,
-            interned: remapper.interned,
-            large: remapper.large
-        )
+        // If the replacement contributed no dynamic-token text, the overlay
+        // would be a pure pass-through to `resolver`. Skip it so the result
+        // tree's resolver retains the base's `tokenKeyNamespace`, which lets
+        // a subsequent `reuseSubtree` from this tree fast-path-match.
+        let resultResolver: any TokenResolver
+        if remapper.interned.isEmpty && remapper.large.isEmpty {
+            resultResolver = resolver
+        } else {
+            resultResolver = OverlayTokenResolver(
+                base: resolver,
+                interned: remapper.interned,
+                large: remapper.large
+            )
+        }
         let witness = ReplacementWitness(
             oldRoot: oldRoot,
             newRoot: newRoot,
@@ -979,7 +988,7 @@ public extension SharedSyntaxTree {
             newSubtree: remappedReplacement
         )
         return ReplacementResult(
-            tree: SyntaxTree(root: newRoot, resolver: overlay),
+            tree: SyntaxTree(root: newRoot, resolver: resultResolver),
             witness: witness
         )
     }
