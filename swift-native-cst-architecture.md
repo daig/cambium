@@ -753,9 +753,17 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
     public mutating func startNode(at checkpoint: BuilderCheckpoint, _ kind: Lang.Kind)
     public mutating func revert(to checkpoint: BuilderCheckpoint)
 
-    public mutating func reuseSubtree(_ node: borrowing SyntaxNodeCursor<Lang>) throws
+    @discardableResult
+    public mutating func reuseSubtree(
+        _ node: borrowing SyntaxNodeCursor<Lang>
+    ) throws -> SubtreeReuseOutcome
 
     public consuming func finish() -> GreenBuildResult<Lang>
+}
+
+public enum SubtreeReuseOutcome: Sendable, Hashable {
+    case direct      // namespace matched; green storage identity preserved
+    case remapped    // namespaces differed; subtree rebuilt with re-interned keys
 }
 ```
 
@@ -763,6 +771,12 @@ Noncopyability prevents accidental duplication of parser state, interner state, 
 `finish()` returns the cache-preserving build result by default. Its
 `snapshot` property gives a copyable `GreenTreeSnapshot` view for APIs that
 only need `root + TokenTextSnapshot`.
+
+`reuseSubtree(_:)` returns a `SubtreeReuseOutcome` so integrators can
+observe whether reuse preserved green storage identity (`.direct`) or had
+to rebuild because namespaces differed (`.remapped`). A high `.remapped`
+rate in incremental parsing typically means the cache was not threaded
+through `result.intoCache()` from the previous build.
 
 ### 12.2 Builder internals
 
@@ -1309,16 +1323,19 @@ Builder reuse:
 
 ```swift
 extension GreenTreeBuilder {
-    public mutating func reuseSubtree(_ node: borrowing SyntaxNodeCursor<Lang>) throws
+    @discardableResult
+    public mutating func reuseSubtree(
+        _ node: borrowing SyntaxNodeCursor<Lang>
+    ) throws -> SubtreeReuseOutcome
 }
 ```
 
 If the source resolver and builder cache share a `TokenKeyNamespace`,
-`reuseSubtree` preserves the source green node storage directly. Otherwise it
-remaps interned and large-token keys into the builder's interner before
-appending the subtree. The parser decides invalidation boundaries and recovery;
-the CST library provides range lookup, green reuse, structural hashing, and
-cache reuse.
+`reuseSubtree` preserves the source green node storage directly and returns
+`.direct`. Otherwise it remaps interned and large-token keys into the
+builder's interner before appending the subtree and returns `.remapped`.
+The parser decides invalidation boundaries and recovery; the CST library
+provides range lookup, green reuse, structural hashing, and cache reuse.
 
 ### 19.3 Bidirectional editor operations
 

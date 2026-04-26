@@ -17,16 +17,15 @@ import Testing
     var targetBuilder = GreenTreeBuilder<TestLanguage>()
     targetBuilder.startNode(.root)
     try targetBuilder.token(.identifier, text: "target")
-    let didReuse = try sourceTree.withRoot { root in
+    let outcome: SubtreeReuseOutcome? = try sourceTree.withRoot { root in
         try root.withChildNode(at: 0) { list in
             try targetBuilder.reuseSubtree(list)
-            return true
-        } ?? false
+        }
     }
     try targetBuilder.finishNode()
     let targetTree = try targetBuilder.finish().snapshot.makeSyntaxTree()
 
-    #expect(didReuse)
+    #expect(outcome == .remapped)
     #expect(targetTree.withRoot { $0.makeString() } == "targetsource+é")
 }
 
@@ -53,11 +52,10 @@ import Testing
 
     var secondBuilder = GreenTreeBuilder<TestLanguage>(cache: consume cache)
     secondBuilder.startNode(.root)
-    let didReuse = try firstTree.withRoot { root in
+    let outcome: SubtreeReuseOutcome? = try firstTree.withRoot { root in
         try root.withChildNode(at: 0) { list in
             try secondBuilder.reuseSubtree(list)
-            return true
-        } ?? false
+        }
     }
     try secondBuilder.finishNode()
 
@@ -69,7 +67,7 @@ import Testing
         }
     }
 
-    #expect(didReuse)
+    #expect(outcome == .direct)
     #expect(reusedListIdentity == originalListIdentity)
     #expect(secondTree.withRoot { $0.makeString() } == "shared")
 }

@@ -438,6 +438,26 @@ public struct GreenBuildResult<Lang: SyntaxLanguage>: ~Copyable {
     }
 }
 
+/// How `GreenTreeBuilder.reuseSubtree(_:)` accepted a subtree.
+///
+/// Use this to observe whether reuse preserved green storage identity from
+/// the source tree (`.direct`) or had to rebuild the subtree because the
+/// source resolver's token-key namespace did not match the builder's
+/// (`.remapped`). A high `.remapped` rate in incremental parsing usually
+/// signals that the integrator failed to carry the cache forward through
+/// `result.intoCache()`.
+public enum SubtreeReuseOutcome: Sendable, Hashable {
+    /// The source resolver shared this builder's token-key namespace, so the
+    /// green node was appended directly. Storage identity is preserved.
+    case direct
+
+    /// The source resolver did not share this builder's token-key namespace,
+    /// so the subtree's dynamic token keys were remapped into this builder's
+    /// interner and the subtree was rebuilt. Storage identity is not
+    /// preserved across the splice.
+    case remapped
+}
+
 final class OverlayTokenResolver: TokenResolver, @unchecked Sendable {
     private let base: any TokenResolver
     private let interned: [TokenKey: String]
@@ -756,13 +776,23 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
         children.removeSubrange(checkpoint.childCount...)
     }
 
+    // MARK: - Subtree reuse
+
     /// Append an existing subtree to this builder.
     ///
     /// If `node`'s resolver shares this builder's token-key namespace, the
-    /// green node is appended directly and storage identity is preserved. If
-    /// namespaces differ, dynamic token keys are remapped into this builder's
-    /// interner before appending.
-    public mutating func reuseSubtree(_ node: borrowing SyntaxNodeCursor<Lang>) throws {
+    /// green node is appended directly and storage identity is preserved
+    /// (`.direct`). Otherwise, dynamic token keys are remapped into this
+    /// builder's interner and the subtree is rebuilt before appending
+    /// (`.remapped`). A `.remapped` outcome usually means the integrator
+    /// could not prove that the source tree shared this builder's interner —
+    /// commonly because the source was decoded from a snapshot, came from a
+    /// different document, or because the cache lineage was severed by
+    /// dropping `result.intoCache()` somewhere upstream.
+    @discardableResult
+    public mutating func reuseSubtree(
+        _ node: borrowing SyntaxNodeCursor<Lang>
+    ) throws -> SubtreeReuseOutcome {
         precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
         let sourceResolver = node.resolver
         if let sourceNamespace = sourceResolver.tokenKeyNamespace,
@@ -771,7 +801,7 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
             node.green { green in
                 children.append(.node(green))
             }
-            return
+            return .direct
         }
 
         var cache = GreenNodeCache<Lang>(storage: cacheStorage)
@@ -784,6 +814,7 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
             )
         }
         children.append(.node(remapped))
+        return .remapped
     }
 
     /// Finish the tree and return the builder's reusable cache.
