@@ -9,10 +9,33 @@ final class MutexBox<Value>: @unchecked Sendable {
     }
 }
 
+/// Caching policy for `GreenNodeCache`.
+///
+/// All policies cache tokens unconditionally when caching is enabled. Green
+/// nodes are subject to a fixed size threshold: nodes with more than three
+/// total children (matching cstree's default) bypass the cache and are
+/// returned without lookup or insertion. Wide nodes rarely recur
+/// structurally, and caching them tends to evict useful small entries while
+/// rarely paying off as a cache hit.
+///
+/// Eviction is deterministic FIFO across the union of token and node entries,
+/// triggered when the combined entry count would exceed `maxEntries`.
 public enum GreenCachePolicy: Sendable, Hashable {
+    /// No caching. Every `makeToken` and `makeNode` call returns a fresh
+    /// allocation; `bypassCount` increments per call.
     case disabled
+
+    /// Per-document cache fixed at 16,384 entries. Suitable for one-shot
+    /// builds and small-to-medium documents.
     case documentLocal
+
+    /// Parse-session cache with an explicit entry limit. Use this when
+    /// carrying the cache forward across reparses via `result.intoCache()`.
+    /// `maxEntries` must be positive; pass `.disabled` to opt out of caching.
     case parseSession(maxEntries: Int)
+
+    /// Shared cache budget for cross-builder use (e.g. via
+    /// `SharedGreenNodeCache`). `maxEntries` must be positive.
     case shared(maxEntries: Int)
 
     var maxEntries: Int {
@@ -294,6 +317,13 @@ final class GreenNodeCacheStorage<Lang: SyntaxLanguage>: @unchecked Sendable {
     }
 }
 
+/// Move-only green-node cache.
+///
+/// Owns the token interner and dedupes recurring green nodes during build.
+/// Carry an instance forward across builders via `result.intoCache()` to
+/// preserve structural sharing and token-key namespace identity for
+/// incremental reparse. See `GreenCachePolicy` for caching rules and
+/// thresholds.
 public struct GreenNodeCache<Lang: SyntaxLanguage>: ~Copyable {
     fileprivate let storage: GreenNodeCacheStorage<Lang>
 
@@ -309,18 +339,26 @@ public struct GreenNodeCache<Lang: SyntaxLanguage>: ~Copyable {
         storage.policy
     }
 
+    /// Cache lookups that returned an existing entry.
     public var hitCount: Int {
         storage.hits
     }
 
+    /// Cache lookups that didn't find an entry and inserted a new one.
     public var missCount: Int {
         storage.misses
     }
 
+    /// Calls that skipped lookup and insertion entirely. Increments when the
+    /// policy is `.disabled` or when a node exceeds the cache's size
+    /// threshold (see `GreenCachePolicy`).
     public var bypassCount: Int {
         storage.bypasses
     }
 
+    /// Entries removed by FIFO eviction to keep the cache within
+    /// `maxEntries`. A bucket of hash-colliding node candidates evicts as one
+    /// entry.
     public var evictionCount: Int {
         storage.evictions
     }
@@ -340,6 +378,11 @@ public struct GreenNodeCache<Lang: SyntaxLanguage>: ~Copyable {
         return interner.storeLargeText(text)
     }
 
+    /// Return a (possibly cached) green token for `(kind, textLength, text)`.
+    ///
+    /// When caching is enabled, identical token shapes deduplicate to the
+    /// same `GreenToken` storage. When the policy is `.disabled`, every call
+    /// returns a fresh token and `bypassCount` increments.
     public mutating func makeToken(
         kind: RawSyntaxKind,
         textLength: TextSize,
@@ -364,6 +407,15 @@ public struct GreenNodeCache<Lang: SyntaxLanguage>: ~Copyable {
         return token
     }
 
+    /// Return a (possibly cached) green node for `(kind, children)`.
+    ///
+    /// Always allocates a candidate node first (its structural hash is the
+    /// cache key). If the candidate has more than three total children, or
+    /// the policy is `.disabled`, the candidate is returned directly and
+    /// `bypassCount` increments — wide nodes recur too rarely to justify
+    /// caching them. Otherwise, the cache is consulted: an equal entry is
+    /// returned in place of the candidate (`hitCount`), or the candidate is
+    /// inserted (`missCount`).
     public mutating func makeNode(
         kind: RawSyntaxKind,
         children: [GreenElement<Lang>]

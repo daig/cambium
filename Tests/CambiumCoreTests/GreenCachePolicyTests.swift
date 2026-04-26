@@ -101,3 +101,20 @@ private func plusToken() -> GreenToken<TestLanguage> {
     #expect(cache.bypassCount == 2)
     #expect(cache.evictionCount == 0)
 }
+
+@Test func disabledPolicyBypassesNodeCache() throws {
+    var cache = GreenNodeCache<TestLanguage>(policy: .disabled)
+    let token = plusToken()
+
+    // A 3-child node would be eligible under any non-disabled policy. Under
+    // `.disabled` it bypasses regardless of size.
+    let first = try cache.makeNode(kind: cacheListKind, children: [.token(token), .token(token), .token(token)])
+    let second = try cache.makeNode(kind: cacheListKind, children: [.token(token), .token(token), .token(token)])
+
+    #expect(first == second)
+    #expect(ObjectIdentifier(first.storage) != ObjectIdentifier(second.storage))
+    #expect(cache.hitCount == 0)
+    #expect(cache.missCount == 0)
+    #expect(cache.bypassCount == 2)
+    #expect(cache.evictionCount == 0)
+}
