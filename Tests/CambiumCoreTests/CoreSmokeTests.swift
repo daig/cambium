@@ -115,6 +115,22 @@ private func makeTraversalTree() throws -> SyntaxTree<TestLanguage> {
     return try builder.finish().makeSyntaxTree()
 }
 
+private func makeSyntaxTextTree() throws -> SyntaxTree<TestLanguage> {
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.root)
+    try builder.token(.identifier, text: "ab")
+    try builder.staticToken(.whitespace)
+    try builder.staticToken(.plus)
+    builder.startNode(.list)
+    try builder.token(.identifier, text: "cd")
+    try builder.staticToken(.whitespace)
+    try builder.largeToken(.identifier, text: "éfg")
+    try builder.finishNode()
+    try builder.finishNode()
+
+    return try builder.finish().makeSyntaxTree()
+}
+
 private func describeElement(_ element: borrowing SyntaxElementCursor<TestLanguage>) -> String {
     switch element {
     case .node(let node):
@@ -178,6 +194,118 @@ private func describeElementWalkEvent(_ event: borrowing SyntaxElementWalkEvent<
     }
 
     #expect(text == "a+é")
+}
+
+@Test func syntaxTextStreamsChunksAndSlicesByByteRange() throws {
+    let tree = try makeSyntaxTextTree()
+
+    try tree.withRoot { root in
+        try root.withText { text in
+            #expect(text.utf8Count == 11)
+            let isEmpty = text.isEmpty
+            #expect(!isEmpty)
+
+            var chunks: [String] = []
+            try text.forEachUTF8Chunk { bytes in
+                chunks.append(String(decoding: bytes, as: UTF8.self))
+            }
+            #expect(chunks == ["ab", " ", "+", "cd", " ", "éfg"])
+
+            var sink = StringUTF8Sink()
+            try text.writeUTF8(to: &sink)
+            #expect(sink.result == "ab +cd éfg")
+            let equalsFullString = text.equals("ab +cd éfg")
+            #expect(equalsFullString)
+
+            let sliceRange = TextRange(start: 1, end: 10)
+            let sliceCount = text.sliced(sliceRange).utf8Count
+            let sliceString = text.sliced(sliceRange).makeString()
+            let partialScalarString = text.sliced(TextRange(start: 8, end: 9)).makeString()
+            #expect(sliceCount == 9)
+            #expect(sliceString == "b +cd éf")
+            #expect(partialScalarString == "�")
+
+            var sliceChunks: [String] = []
+            try text.sliced(sliceRange).forEachUTF8Chunk { bytes in
+                sliceChunks.append(String(decoding: bytes, as: UTF8.self))
+            }
+            #expect(sliceChunks == ["b", " ", "+", "cd", " ", "éf"])
+
+            let empty = text.sliced(TextRange(start: 3, end: 3))
+            let emptyIsEmpty = empty.isEmpty
+            #expect(emptyIsEmpty)
+            #expect(empty.utf8Count == 0)
+            var emptyChunkCount = 0
+            try empty.forEachUTF8Chunk { _ in
+                emptyChunkCount += 1
+            }
+            #expect(emptyChunkCount == 0)
+            let emptyNeedleRange = empty.firstRange(of: [])
+            let emptyString = empty.makeString()
+            #expect(emptyString == "")
+            #expect(emptyNeedleRange == .empty)
+        }
+    }
+}
+
+@Test func syntaxTextFindsBytesAcrossChunkBoundaries() throws {
+    let tree = try makeSyntaxTextTree()
+
+    tree.withRoot { root in
+        root.withText { text in
+            let containsPlus = text.contains(UInt8(ascii: "+"))
+            let plusIndex = text.firstIndex(of: UInt8(ascii: "+"))
+            let unicodeLeadByteIndex = text.firstIndex(of: 0xc3)
+            let missingByteIndex = text.firstIndex(of: UInt8(ascii: "z"))
+            let containsCrossChunkNeedle = text.contains(Array("b +c".utf8))
+            let crossChunkRange = text.firstRange(of: Array("b +c".utf8))
+            let largeTokenRange = text.firstRange(of: Array("d éf".utf8))
+            let missingRange = text.firstRange(of: Array("missing".utf8))
+
+            #expect(containsPlus)
+            #expect(plusIndex == 3)
+            #expect(unicodeLeadByteIndex == 7)
+            #expect(missingByteIndex == nil)
+            #expect(containsCrossChunkNeedle)
+            #expect(crossChunkRange == TextRange(start: 1, length: 4))
+            #expect(largeTokenRange == TextRange(start: 5, length: 5))
+            #expect(missingRange == nil)
+
+            let tail = text.sliced(TextRange(start: 4, end: 11))
+            let tailUnicodeLeadByteIndex = tail.firstIndex(of: 0xc3)
+            let tailUnicodeRange = tail.firstRange(of: Array("éfg".utf8))
+            let tailEmptyNeedleRange = tail.firstRange(of: [])
+            #expect(tailUnicodeLeadByteIndex == 3)
+            #expect(tailUnicodeRange == TextRange(start: 3, length: 4))
+            #expect(tailEmptyNeedleRange == .empty)
+        }
+    }
+}
+
+@Test func syntaxTextComparesStringsAndOtherSyntaxTextWithoutMaterializingFullText() throws {
+    let tree = try makeSyntaxTextTree()
+
+    tree.withRoot { root in
+        root.withText { text in
+            let equalsFull = text.equals("ab +cd éfg")
+            let equalsAsciiOnly = text.equals("ab +cd efg")
+            let equalsExtraByte = text.equals("ab +cd éfg ")
+            #expect(equalsFull)
+            #expect(!equalsAsciiOnly)
+            #expect(!equalsExtraByte)
+
+            let first = text.sliced(TextRange(start: 1, end: 10))
+            let second = text.sliced(TextRange(start: 1, end: 10))
+            let equalSlices = first.equals(second)
+            #expect(equalSlices)
+
+            let different = text.sliced(TextRange(start: 2, end: 11))
+            let unequalSlices = text.sliced(TextRange(start: 1, end: 10)).equals(different)
+            let equalsUnicodeTail = text.sliced(TextRange(start: 7, end: 11)).equals("éfg")
+            #expect(!unequalSlices)
+            #expect(equalsUnicodeTail)
+        }
+    }
 }
 
 @Test func builderCheckpointsWrapExistingChildren() throws {

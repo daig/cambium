@@ -22,6 +22,7 @@ parser-neutral infrastructure, and immutable trees updated through replacement.
 - Borrowed node/token cursors and copyable node/token handles.
 - Borrowed core traversal for first/last children, node/token siblings,
   ancestors, descendants, and preorder walk events.
+- Byte-first `SyntaxText` chunk iteration, search, slicing, and equality.
 - Anchors for cross-version node resolution.
 - Node replacement by rebuilding the ancestor path.
 - Green snapshot serialization and decoding.
@@ -72,22 +73,33 @@ cstree's `SyntaxText` supports efficient operations over distributed token text
 without eagerly building a `String`. Cambium's `SyntaxText` currently supports
 UTF-8 writing, byte length, and string materialization.
 
-Incremental work:
+Status: the byte-first `SyntaxText` slice is complete. `SyntaxText` now supports
+range-aware chunk iteration, byte search, byte-range slicing, and streaming
+equality against strings and other syntax text values without requiring full
+string materialization.
 
-1. Add `isEmpty`.
-2. Add chunk iteration over token UTF-8 buffers.
-3. Add `contains(_ byte:)` or Unicode-aware `containsCharacter(_:)` after
-   deciding the intended abstraction boundary.
-4. Add `find` operations for byte and/or character search.
-5. Add slicing by `TextRange`.
-6. Add efficient equality against strings and other `SyntaxText` values.
+Completed work:
+
+1. Added `isEmpty`.
+2. Added chunk iteration over token UTF-8 buffers.
+3. Added byte-oriented `contains` helpers.
+4. Added byte-oriented `firstIndex` and `firstRange` search helpers.
+5. Added slicing by relative `TextRange`.
+6. Added efficient equality against strings and other `SyntaxText` values.
+
+Remaining follow-up:
+
+1. Decide whether Unicode `Character` or grapheme-cluster operations belong in
+   `SyntaxText` or in a higher-level utility.
+2. Add more specialized search APIs only when a concrete parser, formatter, or
+   query caller needs them.
 
 Acceptance criteria:
 
-- Formatters, lexers, and query code can inspect subtree text without allocating
+- Formatters, lexers, and query code can now inspect subtree text without allocating
   the full string.
 - Slicing preserves byte-offset semantics and validates range bounds.
-- Unicode behavior is documented explicitly.
+- Unicode behavior remains explicit: this completed slice is UTF-8 byte oriented.
 
 ## Priority 3: Token-Level Navigation And Replacement
 
@@ -262,13 +274,12 @@ Acceptance criteria:
 
 Suggested next slices:
 
-1. `SyntaxText` chunk iteration and byte search.
-2. Token stream navigation: previous/next token across subtree boundaries.
-3. Token replacement.
-4. Owned traversal conveniences for selected borrowed traversal helpers.
-5. Incremental reuse oracle correctness upgrade.
-6. Debug tree rendering API and getting-started example.
-7. Concurrency stress tests for red realization.
+1. Token stream navigation: previous/next token across subtree boundaries.
+2. Token replacement.
+3. Owned traversal conveniences for selected borrowed traversal helpers.
+4. Incremental reuse oracle correctness upgrade.
+5. Debug tree rendering API and getting-started example.
+6. Concurrency stress tests for red realization.
 
 Each slice should include focused tests and avoid changing parser-neutral core
 contracts unless the new API has a clear downstream use case.
