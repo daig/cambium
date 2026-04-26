@@ -414,6 +414,21 @@ public enum TraversalControl: Sendable, Hashable {
     case stop
 }
 
+public enum TraversalDirection: Sendable, Hashable {
+    case forward
+    case backward
+}
+
+public enum SyntaxNodeWalkEvent<Lang: SyntaxLanguage>: ~Copyable {
+    case enter(SyntaxNodeCursor<Lang>)
+    case leave(SyntaxNodeCursor<Lang>)
+}
+
+public enum SyntaxElementWalkEvent<Lang: SyntaxLanguage>: ~Copyable {
+    case enter(SyntaxElementCursor<Lang>)
+    case leave(SyntaxElementCursor<Lang>)
+}
+
 public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
     private let storageRef: Unmanaged<SyntaxTreeStorage<Lang>>
     internal var id: RedNodeID
@@ -544,6 +559,56 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
         return false
     }
 
+    private borrowing func withRawChildNode<R>(
+        at childIndex: Int,
+        _ body: (borrowing SyntaxNodeCursor<Lang>) throws -> R
+    ) rethrows -> R? {
+        guard let childID = storage.arena.realizeChildNode(parent: id, childIndex: childIndex) else {
+            return nil
+        }
+        let cursor = SyntaxNodeCursor(storage: storage, id: childID)
+        return try body(cursor)
+    }
+
+    private borrowing func withRawChildOrToken<R>(
+        parent parentID: RedNodeID,
+        parentRecord: RedNodeRecord<Lang>,
+        at childIndex: Int,
+        _ body: (borrowing SyntaxElementCursor<Lang>) throws -> R
+    ) rethrows -> R? {
+        guard childIndex >= 0 && childIndex < parentRecord.green.childCount else {
+            return nil
+        }
+
+        switch parentRecord.green.child(at: childIndex) {
+        case .node:
+            guard let childID = storage.arena.realizeChildNode(parent: parentID, childIndex: childIndex) else {
+                return nil
+            }
+            let node = SyntaxNodeCursor(storage: storage, id: childID)
+            let element = SyntaxElementCursor<Lang>.node(node)
+            return try body(element)
+        case .token(let token):
+            let token = SyntaxTokenCursor(
+                storage: storage,
+                parent: parentID,
+                childIndex: UInt32(childIndex),
+                offset: parentRecord.offset + parentRecord.green.childStartOffset(at: childIndex),
+                green: token
+            )
+            let element = SyntaxElementCursor<Lang>.token(token)
+            return try body(element)
+        }
+    }
+
+    private borrowing func withRawChildOrToken<R>(
+        at childIndex: Int,
+        _ body: (borrowing SyntaxElementCursor<Lang>) throws -> R
+    ) rethrows -> R? {
+        let record = record
+        return try withRawChildOrToken(parent: id, parentRecord: record, at: childIndex, body)
+    }
+
     public borrowing func withParent<R>(
         _ body: (borrowing SyntaxNodeCursor<Lang>) throws -> R
     ) rethrows -> R? {
@@ -566,13 +631,38 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
                 continue
             }
             if seen == nodeIndex {
-                guard let childID = storage.arena.realizeChildNode(parent: id, childIndex: childIndex) else {
-                    return nil
-                }
-                let cursor = SyntaxNodeCursor(storage: storage, id: childID)
-                return try body(cursor)
+                return try withRawChildNode(at: childIndex, body)
             }
             seen += 1
+        }
+        return nil
+    }
+
+    public borrowing func withFirstChild<R>(
+        _ body: (borrowing SyntaxNodeCursor<Lang>) throws -> R
+    ) rethrows -> R? {
+        let green = record.green
+        for childIndex in 0..<green.childCount {
+            guard case .node = green.child(at: childIndex) else {
+                continue
+            }
+            return try withRawChildNode(at: childIndex, body)
+        }
+        return nil
+    }
+
+    public borrowing func withLastChild<R>(
+        _ body: (borrowing SyntaxNodeCursor<Lang>) throws -> R
+    ) rethrows -> R? {
+        let green = record.green
+        guard green.childCount > 0 else {
+            return nil
+        }
+        for childIndex in stride(from: green.childCount - 1, through: 0, by: -1) {
+            guard case .node = green.child(at: childIndex) else {
+                continue
+            }
+            return try withRawChildNode(at: childIndex, body)
         }
         return nil
     }
@@ -581,30 +671,89 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
         at childIndex: Int,
         _ body: (borrowing SyntaxElementCursor<Lang>) throws -> R
     ) rethrows -> R? {
-        let record = record
-        guard childIndex >= 0 && childIndex < record.green.childCount else {
+        try withRawChildOrToken(at: childIndex, body)
+    }
+
+    public borrowing func withFirstChildOrToken<R>(
+        _ body: (borrowing SyntaxElementCursor<Lang>) throws -> R
+    ) rethrows -> R? {
+        guard childOrTokenCount > 0 else {
             return nil
         }
+        return try withRawChildOrToken(at: 0, body)
+    }
 
-        switch record.green.child(at: childIndex) {
-        case .node:
-            guard let childID = storage.arena.realizeChildNode(parent: id, childIndex: childIndex) else {
-                return nil
-            }
-            let node = SyntaxNodeCursor(storage: storage, id: childID)
-            let element = SyntaxElementCursor<Lang>.node(node)
-            return try body(element)
-        case .token(let token):
-            let token = SyntaxTokenCursor(
-                storage: storage,
-                parent: id,
-                childIndex: UInt32(childIndex),
-                offset: record.offset + record.green.childStartOffset(at: childIndex),
-                green: token
-            )
-            let element = SyntaxElementCursor<Lang>.token(token)
-            return try body(element)
+    public borrowing func withLastChildOrToken<R>(
+        _ body: (borrowing SyntaxElementCursor<Lang>) throws -> R
+    ) rethrows -> R? {
+        let count = childOrTokenCount
+        guard count > 0 else {
+            return nil
         }
+        return try withRawChildOrToken(at: count - 1, body)
+    }
+
+    public borrowing func withNextSibling<R>(
+        _ body: (borrowing SyntaxNodeCursor<Lang>) throws -> R
+    ) rethrows -> R? {
+        let current = record
+        guard let parentID = current.parent else {
+            return nil
+        }
+        let parent = storage.arena.record(for: parentID)
+        let start = Int(current.indexInParent) + 1
+        guard start < parent.green.childCount else {
+            return nil
+        }
+        for childIndex in start..<parent.green.childCount {
+            guard let childID = storage.arena.realizeChildNode(parent: parentID, childIndex: childIndex) else {
+                continue
+            }
+            let cursor = SyntaxNodeCursor(storage: storage, id: childID)
+            return try body(cursor)
+        }
+        return nil
+    }
+
+    public borrowing func withPreviousSibling<R>(
+        _ body: (borrowing SyntaxNodeCursor<Lang>) throws -> R
+    ) rethrows -> R? {
+        let current = record
+        guard let parentID = current.parent, current.indexInParent > 0 else {
+            return nil
+        }
+        for childIndex in stride(from: Int(current.indexInParent) - 1, through: 0, by: -1) {
+            guard let childID = storage.arena.realizeChildNode(parent: parentID, childIndex: childIndex) else {
+                continue
+            }
+            let cursor = SyntaxNodeCursor(storage: storage, id: childID)
+            return try body(cursor)
+        }
+        return nil
+    }
+
+    public borrowing func withNextSiblingOrToken<R>(
+        _ body: (borrowing SyntaxElementCursor<Lang>) throws -> R
+    ) rethrows -> R? {
+        let current = record
+        guard let parentID = current.parent else {
+            return nil
+        }
+        let parent = storage.arena.record(for: parentID)
+        let childIndex = Int(current.indexInParent) + 1
+        return try withRawChildOrToken(parent: parentID, parentRecord: parent, at: childIndex, body)
+    }
+
+    public borrowing func withPreviousSiblingOrToken<R>(
+        _ body: (borrowing SyntaxElementCursor<Lang>) throws -> R
+    ) rethrows -> R? {
+        let current = record
+        guard let parentID = current.parent, current.indexInParent > 0 else {
+            return nil
+        }
+        let parent = storage.arena.record(for: parentID)
+        let childIndex = Int(current.indexInParent) - 1
+        return try withRawChildOrToken(parent: parentID, parentRecord: parent, at: childIndex, body)
     }
 
     public borrowing func forEachChild(
@@ -622,12 +771,166 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
         }
     }
 
+    public borrowing func forEachSibling(
+        direction: TraversalDirection = .forward,
+        includingSelf: Bool = false,
+        _ body: (borrowing SyntaxNodeCursor<Lang>) throws -> Void
+    ) rethrows {
+        let current = record
+        if includingSelf {
+            try body(self)
+        }
+
+        guard let parentID = current.parent else {
+            return
+        }
+
+        let parent = storage.arena.record(for: parentID)
+        switch direction {
+        case .forward:
+            let start = Int(current.indexInParent) + 1
+            guard start < parent.green.childCount else {
+                return
+            }
+            for childIndex in start..<parent.green.childCount {
+                guard let sibling = storage.arena.realizeChildNode(parent: parentID, childIndex: childIndex) else {
+                    continue
+                }
+                let cursor = SyntaxNodeCursor(storage: storage, id: sibling)
+                try body(cursor)
+            }
+        case .backward:
+            guard current.indexInParent > 0 else {
+                return
+            }
+            for childIndex in stride(from: Int(current.indexInParent) - 1, through: 0, by: -1) {
+                guard let sibling = storage.arena.realizeChildNode(parent: parentID, childIndex: childIndex) else {
+                    continue
+                }
+                let cursor = SyntaxNodeCursor(storage: storage, id: sibling)
+                try body(cursor)
+            }
+        }
+    }
+
+    public borrowing func forEachSiblingOrToken(
+        direction: TraversalDirection = .forward,
+        includingSelf: Bool = false,
+        _ body: (borrowing SyntaxElementCursor<Lang>) throws -> Void
+    ) rethrows {
+        let current = record
+        if includingSelf {
+            let node = SyntaxNodeCursor(storage: storage, id: id)
+            let element = SyntaxElementCursor<Lang>.node(node)
+            try body(element)
+        }
+
+        guard let parentID = current.parent else {
+            return
+        }
+
+        let parent = storage.arena.record(for: parentID)
+        switch direction {
+        case .forward:
+            let start = Int(current.indexInParent) + 1
+            guard start < parent.green.childCount else {
+                return
+            }
+            for childIndex in start..<parent.green.childCount {
+                _ = try withRawChildOrToken(parent: parentID, parentRecord: parent, at: childIndex) { element in
+                    try body(element)
+                }
+            }
+        case .backward:
+            guard current.indexInParent > 0 else {
+                return
+            }
+            for childIndex in stride(from: Int(current.indexInParent) - 1, through: 0, by: -1) {
+                _ = try withRawChildOrToken(parent: parentID, parentRecord: parent, at: childIndex) { element in
+                    try body(element)
+                }
+            }
+        }
+    }
+
     public borrowing func forEachChildOrToken(
         _ body: (borrowing SyntaxElementCursor<Lang>) throws -> Void
     ) rethrows {
         let count = childOrTokenCount
         for index in 0..<count {
             _ = try withChildOrToken(at: index) { element in
+                try body(element)
+            }
+        }
+    }
+
+    public borrowing func forEachAncestor(
+        includingSelf: Bool = false,
+        _ body: (borrowing SyntaxNodeCursor<Lang>) throws -> Void
+    ) rethrows {
+        if includingSelf {
+            try body(self)
+        }
+
+        var current = record
+        while let parent = current.parent {
+            let cursor = SyntaxNodeCursor(storage: storage, id: parent)
+            try body(cursor)
+            current = storage.arena.record(for: parent)
+        }
+    }
+
+    public borrowing func forEachDescendant(
+        includingSelf: Bool = false,
+        _ body: (borrowing SyntaxNodeCursor<Lang>) throws -> Void
+    ) rethrows {
+        if includingSelf {
+            try body(self)
+        }
+
+        let record = record
+        for childIndex in 0..<record.green.childCount {
+            guard let childID = storage.arena.realizeChildNode(parent: id, childIndex: childIndex) else {
+                continue
+            }
+            let child = SyntaxNodeCursor(storage: storage, id: childID)
+            try body(child)
+            let descendant = SyntaxNodeCursor(storage: storage, id: childID)
+            try descendant.forEachDescendant(includingSelf: false, body)
+        }
+    }
+
+    public borrowing func forEachDescendantOrToken(
+        includingSelf: Bool = false,
+        _ body: (borrowing SyntaxElementCursor<Lang>) throws -> Void
+    ) rethrows {
+        if includingSelf {
+            let node = SyntaxNodeCursor(storage: storage, id: id)
+            let element = SyntaxElementCursor<Lang>.node(node)
+            try body(element)
+        }
+
+        let record = record
+        for childIndex in 0..<record.green.childCount {
+            switch record.green.child(at: childIndex) {
+            case .node:
+                guard let childID = storage.arena.realizeChildNode(parent: id, childIndex: childIndex) else {
+                    continue
+                }
+                let node = SyntaxNodeCursor(storage: storage, id: childID)
+                let element = SyntaxElementCursor<Lang>.node(node)
+                try body(element)
+                let descendant = SyntaxNodeCursor(storage: storage, id: childID)
+                try descendant.forEachDescendantOrToken(includingSelf: false, body)
+            case .token(let token):
+                let token = SyntaxTokenCursor(
+                    storage: storage,
+                    parent: id,
+                    childIndex: UInt32(childIndex),
+                    offset: record.offset + record.green.childStartOffset(at: childIndex),
+                    green: token
+                )
+                let element = SyntaxElementCursor<Lang>.token(token)
                 try body(element)
             }
         }
@@ -646,6 +949,123 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
             }
             return shouldStop ? .stop : .continue
         case .skipChildren:
+            return .continue
+        case .stop:
+            return .stop
+        }
+    }
+
+    public borrowing func walkPreorder(
+        _ body: (borrowing SyntaxNodeWalkEvent<Lang>) throws -> TraversalControl
+    ) rethrows -> TraversalControl {
+        let enterNode = SyntaxNodeCursor(storage: storage, id: id)
+        let enterEvent = SyntaxNodeWalkEvent<Lang>.enter(enterNode)
+        let enterControl = try body(enterEvent)
+        switch enterControl {
+        case .continue:
+            let record = record
+            for childIndex in 0..<record.green.childCount {
+                guard let childID = storage.arena.realizeChildNode(parent: id, childIndex: childIndex) else {
+                    continue
+                }
+                let child = SyntaxNodeCursor(storage: storage, id: childID)
+                if try child.walkPreorder(body) == .stop {
+                    return .stop
+                }
+            }
+        case .skipChildren:
+            break
+        case .stop:
+            return .stop
+        }
+
+        let leaveNode = SyntaxNodeCursor(storage: storage, id: id)
+        let leaveEvent = SyntaxNodeWalkEvent<Lang>.leave(leaveNode)
+        switch try body(leaveEvent) {
+        case .continue, .skipChildren:
+            return .continue
+        case .stop:
+            return .stop
+        }
+    }
+
+    private borrowing func walkTokenPreorder(
+        at childIndex: Int,
+        token: GreenToken<Lang>,
+        parentRecord: RedNodeRecord<Lang>,
+        _ body: (borrowing SyntaxElementWalkEvent<Lang>) throws -> TraversalControl
+    ) rethrows -> TraversalControl {
+        let childOffset = parentRecord.offset + parentRecord.green.childStartOffset(at: childIndex)
+        let enterToken = SyntaxTokenCursor(
+            storage: storage,
+            parent: id,
+            childIndex: UInt32(childIndex),
+            offset: childOffset,
+            green: token
+        )
+        let enterElement = SyntaxElementCursor<Lang>.token(enterToken)
+        let enterEvent = SyntaxElementWalkEvent<Lang>.enter(enterElement)
+        switch try body(enterEvent) {
+        case .continue, .skipChildren:
+            break
+        case .stop:
+            return .stop
+        }
+
+        let leaveToken = SyntaxTokenCursor(
+            storage: storage,
+            parent: id,
+            childIndex: UInt32(childIndex),
+            offset: childOffset,
+            green: token
+        )
+        let leaveElement = SyntaxElementCursor<Lang>.token(leaveToken)
+        let leaveEvent = SyntaxElementWalkEvent<Lang>.leave(leaveElement)
+        switch try body(leaveEvent) {
+        case .continue, .skipChildren:
+            return .continue
+        case .stop:
+            return .stop
+        }
+    }
+
+    public borrowing func walkPreorderWithTokens(
+        _ body: (borrowing SyntaxElementWalkEvent<Lang>) throws -> TraversalControl
+    ) rethrows -> TraversalControl {
+        let enterNode = SyntaxNodeCursor(storage: storage, id: id)
+        let enterElement = SyntaxElementCursor<Lang>.node(enterNode)
+        let enterEvent = SyntaxElementWalkEvent<Lang>.enter(enterElement)
+        let enterControl = try body(enterEvent)
+        switch enterControl {
+        case .continue:
+            let record = record
+            for childIndex in 0..<record.green.childCount {
+                switch record.green.child(at: childIndex) {
+                case .node:
+                    guard let childID = storage.arena.realizeChildNode(parent: id, childIndex: childIndex) else {
+                        continue
+                    }
+                    let child = SyntaxNodeCursor(storage: storage, id: childID)
+                    if try child.walkPreorderWithTokens(body) == .stop {
+                        return .stop
+                    }
+                case .token(let token):
+                    if try walkTokenPreorder(at: childIndex, token: token, parentRecord: record, body) == .stop {
+                        return .stop
+                    }
+                }
+            }
+        case .skipChildren:
+            break
+        case .stop:
+            return .stop
+        }
+
+        let leaveNode = SyntaxNodeCursor(storage: storage, id: id)
+        let leaveElement = SyntaxElementCursor<Lang>.node(leaveNode)
+        let leaveEvent = SyntaxElementWalkEvent<Lang>.leave(leaveElement)
+        switch try body(leaveEvent) {
+        case .continue, .skipChildren:
             return .continue
         case .stop:
             return .stop
@@ -923,6 +1343,105 @@ public struct SyntaxTokenCursor<Lang: SyntaxLanguage>: ~Copyable {
     ) rethrows -> R {
         let cursor = SyntaxNodeCursor(storage: storage, id: parent)
         return try body(cursor)
+    }
+
+    private borrowing func withSiblingOrToken<R>(
+        at siblingIndex: Int,
+        _ body: (borrowing SyntaxElementCursor<Lang>) throws -> R
+    ) rethrows -> R? {
+        let parentRecord = storage.arena.record(for: parent)
+        guard siblingIndex >= 0 && siblingIndex < parentRecord.green.childCount else {
+            return nil
+        }
+
+        switch parentRecord.green.child(at: siblingIndex) {
+        case .node:
+            guard let childID = storage.arena.realizeChildNode(parent: parent, childIndex: siblingIndex) else {
+                return nil
+            }
+            let node = SyntaxNodeCursor(storage: storage, id: childID)
+            let element = SyntaxElementCursor<Lang>.node(node)
+            return try body(element)
+        case .token(let token):
+            let token = SyntaxTokenCursor(
+                storage: storage,
+                parent: parent,
+                childIndex: UInt32(siblingIndex),
+                offset: parentRecord.offset + parentRecord.green.childStartOffset(at: siblingIndex),
+                green: token
+            )
+            let element = SyntaxElementCursor<Lang>.token(token)
+            return try body(element)
+        }
+    }
+
+    public borrowing func withNextSiblingOrToken<R>(
+        _ body: (borrowing SyntaxElementCursor<Lang>) throws -> R
+    ) rethrows -> R? {
+        try withSiblingOrToken(at: Int(childIndex) + 1, body)
+    }
+
+    public borrowing func withPreviousSiblingOrToken<R>(
+        _ body: (borrowing SyntaxElementCursor<Lang>) throws -> R
+    ) rethrows -> R? {
+        try withSiblingOrToken(at: Int(childIndex) - 1, body)
+    }
+
+    public borrowing func forEachAncestor(
+        _ body: (borrowing SyntaxNodeCursor<Lang>) throws -> Void
+    ) rethrows {
+        var currentID = parent
+        while true {
+            let cursor = SyntaxNodeCursor(storage: storage, id: currentID)
+            try body(cursor)
+
+            let current = storage.arena.record(for: currentID)
+            guard let parentID = current.parent else {
+                return
+            }
+            currentID = parentID
+        }
+    }
+
+    public borrowing func forEachSiblingOrToken(
+        direction: TraversalDirection = .forward,
+        includingSelf: Bool = false,
+        _ body: (borrowing SyntaxElementCursor<Lang>) throws -> Void
+    ) rethrows {
+        let parentRecord = storage.arena.record(for: parent)
+        if includingSelf {
+            let token = SyntaxTokenCursor(
+                storage: storage,
+                parent: parent,
+                childIndex: childIndex,
+                offset: offset,
+                green: green
+            )
+            let element = SyntaxElementCursor<Lang>.token(token)
+            try body(element)
+        }
+
+        switch direction {
+        case .forward:
+            let start = Int(childIndex) + 1
+            guard start < parentRecord.green.childCount else {
+                return
+            }
+            for siblingIndex in start..<parentRecord.green.childCount {
+                _ = try withSiblingOrToken(at: siblingIndex) { element in
+                    try body(element)
+                }
+            }
+        case .backward:
+            guard childIndex > 0 else {
+                return
+            }
+            for siblingIndex in stride(from: Int(childIndex) - 1, through: 0, by: -1) {
+                _ = try withSiblingOrToken(at: siblingIndex) { element in
+                    try body(element)
+                }
+            }
+        }
     }
 
     public borrowing func withTextUTF8<R>(

@@ -80,6 +80,68 @@ private enum OtherLanguage: SyntaxLanguage {
     }
 }
 
+private func makeTraversalTree() throws -> SyntaxTree<TestLanguage> {
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.root)
+    try builder.token(.identifier, text: "a")
+    try builder.staticToken(.whitespace)
+    builder.startNode(.list)
+    try builder.token(.identifier, text: "b")
+    try builder.staticToken(.whitespace)
+    builder.startNode(.list)
+    try builder.token(.identifier, text: "c")
+    try builder.staticToken(.whitespace)
+    try builder.staticToken(.plus)
+    try builder.staticToken(.whitespace)
+    try builder.token(.identifier, text: "d")
+    try builder.finishNode()
+    try builder.staticToken(.whitespace)
+    try builder.staticToken(.plus)
+    try builder.staticToken(.whitespace)
+    builder.startNode(.list)
+    try builder.token(.identifier, text: "e")
+    try builder.finishNode()
+    try builder.finishNode()
+    try builder.staticToken(.whitespace)
+    try builder.staticToken(.plus)
+    try builder.staticToken(.whitespace)
+    builder.startNode(.list)
+    try builder.token(.identifier, text: "f")
+    try builder.finishNode()
+    try builder.staticToken(.whitespace)
+    try builder.token(.identifier, text: "z")
+    try builder.finishNode()
+
+    return try builder.finish().makeSyntaxTree()
+}
+
+private func describeElement(_ element: borrowing SyntaxElementCursor<TestLanguage>) -> String {
+    switch element {
+    case .node(let node):
+        "node:\(TestLanguage.name(for: node.kind)):\(node.makeString())"
+    case .token(let token):
+        "token:\(TestLanguage.name(for: token.kind)):\(token.makeString())@\(token.textRange.start.rawValue)"
+    }
+}
+
+private func describeNodeWalkEvent(_ event: borrowing SyntaxNodeWalkEvent<TestLanguage>) -> String {
+    switch event {
+    case .enter(let node):
+        "enter:\(TestLanguage.name(for: node.kind)):\(node.makeString())"
+    case .leave(let node):
+        "leave:\(TestLanguage.name(for: node.kind)):\(node.makeString())"
+    }
+}
+
+private func describeElementWalkEvent(_ event: borrowing SyntaxElementWalkEvent<TestLanguage>) -> String {
+    switch event {
+    case .enter(let element):
+        "enter:\(describeElement(element))"
+    case .leave(let element):
+        "leave:\(describeElement(element))"
+    }
+}
+
 @Test func textRangeComputesLengthAndChecksUTF8Counts() throws {
     let range = TextRange(start: 4, end: 9)
     #expect(range.length == 5)
@@ -174,6 +236,254 @@ private enum OtherLanguage: SyntaxLanguage {
     let tokens = rootHandle.tokenHandles()
     #expect(tokens.count == 5)
     #expect(tokens[4].withCursor { $0.makeString() } == "right")
+}
+
+@Test func traversalChildHelpersDistinguishNodesAndTokens() throws {
+    let tree = try makeTraversalTree()
+    let labels = tree.withRoot { root in
+        [
+            root.withFirstChild { child in child.makeString() } ?? "nil",
+            root.withLastChild { child in child.makeString() } ?? "nil",
+            root.withFirstChildOrToken { element in describeElement(element) } ?? "nil",
+            root.withLastChildOrToken { element in describeElement(element) } ?? "nil",
+        ]
+    }
+
+    #expect(labels == [
+        "b c + d + e",
+        "f",
+        "token:identifier:a@0",
+        "token:identifier:z@18",
+    ])
+}
+
+@Test func traversalSiblingAPIsSkipOrIncludeTokens() throws {
+    let tree = try makeTraversalTree()
+    let labels = tree.withRoot { root in
+        var labels: [String] = []
+
+        _ = root.withChildNode(at: 0) { outer in
+            labels.append("outer.nextNode:\(outer.withNextSibling { sibling in sibling.makeString() } ?? "nil")")
+            labels.append("outer.prevNode:\(outer.withPreviousSibling { sibling in sibling.makeString() } ?? "nil")")
+            labels.append("outer.nextElement:\(outer.withNextSiblingOrToken { element in describeElement(element) } ?? "nil")")
+            labels.append("outer.prevElement:\(outer.withPreviousSiblingOrToken { element in describeElement(element) } ?? "nil")")
+
+            var forwardNodes: [String] = []
+            outer.forEachSibling(direction: .forward, includingSelf: true) { sibling in
+                forwardNodes.append(sibling.makeString())
+            }
+            labels.append("outer.forwardNodes:\(forwardNodes.joined(separator: "|"))")
+        }
+
+        _ = root.withChildNode(at: 1) { rhs in
+            labels.append("rhs.previousNode:\(rhs.withPreviousSibling { sibling in sibling.makeString() } ?? "nil")")
+            labels.append("rhs.nextNode:\(rhs.withNextSibling { sibling in sibling.makeString() } ?? "nil")")
+
+            var backwardNodes: [String] = []
+            rhs.forEachSibling(direction: .backward, includingSelf: true) { sibling in
+                backwardNodes.append(sibling.makeString())
+            }
+            labels.append("rhs.backwardNodes:\(backwardNodes.joined(separator: "|"))")
+        }
+
+        _ = root.withToken(at: 13) { token in
+            labels.append("token13.prev:\(token.withPreviousSiblingOrToken { element in describeElement(element) } ?? "nil")")
+            labels.append("token13.next:\(token.withNextSiblingOrToken { element in describeElement(element) } ?? "nil")")
+
+            var forwardElements: [String] = []
+            token.forEachSiblingOrToken(direction: .forward, includingSelf: true) { element in
+                forwardElements.append(describeElement(element))
+            }
+            labels.append("token13.forward:\(forwardElements.joined(separator: "|"))")
+        }
+
+        _ = root.withToken(at: 15) { token in
+            labels.append("token15.next:\(token.withNextSiblingOrToken { element in describeElement(element) } ?? "nil")")
+            labels.append("token15.prev:\(token.withPreviousSiblingOrToken { element in describeElement(element) } ?? "nil")")
+        }
+
+        return labels
+    }
+
+    #expect(labels == [
+        "outer.nextNode:f",
+        "outer.prevNode:nil",
+        "outer.nextElement:token:whitespace: @13",
+        "outer.prevElement:token:whitespace: @1",
+        "outer.forwardNodes:b c + d + e|f",
+        "rhs.previousNode:b c + d + e",
+        "rhs.nextNode:nil",
+        "rhs.backwardNodes:f|b c + d + e",
+        "token13.prev:node:list:b c + d + e",
+        "token13.next:token:plus:+@14",
+        "token13.forward:token:whitespace: @13|token:plus:+@14|token:whitespace: @15|node:list:f|token:whitespace: @17|token:identifier:z@18",
+        "token15.next:node:list:f",
+        "token15.prev:token:plus:+@14",
+    ])
+}
+
+@Test func traversalAncestorsWalkNearestToRoot() throws {
+    let tree = try makeTraversalTree()
+    let labels = tree.withRoot { root in
+        var labels: [String] = []
+
+        _ = root.withDescendant(atPath: [2, 2]) { inner in
+            var ancestors: [String] = []
+            inner.forEachAncestor { ancestor in
+                ancestors.append(ancestor.makeString())
+            }
+            labels.append("nodeAncestors:\(ancestors.joined(separator: "|"))")
+
+            var includingSelf: [String] = []
+            inner.forEachAncestor(includingSelf: true) { ancestor in
+                includingSelf.append(ancestor.makeString())
+            }
+            labels.append("nodeAncestorsSelf:\(includingSelf.joined(separator: "|"))")
+        }
+
+        _ = root.withToken(at: 8) { token in
+            var ancestors: [String] = []
+            token.forEachAncestor { ancestor in
+                ancestors.append(ancestor.makeString())
+            }
+            labels.append("tokenAncestors:\(ancestors.joined(separator: "|"))")
+        }
+
+        return labels
+    }
+
+    #expect(labels == [
+        "nodeAncestors:b c + d + e|a b c + d + e + f z",
+        "nodeAncestorsSelf:c + d|b c + d + e|a b c + d + e + f z",
+        "tokenAncestors:c + d|b c + d + e|a b c + d + e + f z",
+    ])
+}
+
+@Test func traversalDescendantsVisitNodesAndTokensInSourceOrder() throws {
+    let tree = try makeTraversalTree()
+    let labels = tree.withRoot { root in
+        var labels: [String] = []
+
+        var nodeDescendants: [String] = []
+        root.forEachDescendant { descendant in
+            nodeDescendants.append(descendant.makeString())
+        }
+        labels.append("nodes:\(nodeDescendants.joined(separator: "|"))")
+
+        var nodeDescendantsIncludingRoot: [String] = []
+        root.forEachDescendant(includingSelf: true) { descendant in
+            nodeDescendantsIncludingRoot.append(descendant.makeString())
+        }
+        labels.append("nodesSelf:\(nodeDescendantsIncludingRoot.joined(separator: "|"))")
+
+        _ = root.withDescendant(atPath: [2]) { outer in
+            var elements: [String] = []
+            outer.forEachDescendantOrToken(includingSelf: true) { element in
+                elements.append(describeElement(element))
+            }
+            labels.append("elements:\(elements.joined(separator: "|"))")
+        }
+
+        return labels
+    }
+
+    #expect(labels == [
+        "nodes:b c + d + e|c + d|e|f",
+        "nodesSelf:a b c + d + e + f z|b c + d + e|c + d|e|f",
+        "elements:node:list:b c + d + e|token:identifier:b@2|token:whitespace: @3|node:list:c + d|token:identifier:c@4|token:whitespace: @5|token:plus:+@6|token:whitespace: @7|token:identifier:d@8|token:whitespace: @9|token:plus:+@10|token:whitespace: @11|node:list:e|token:identifier:e@12",
+    ])
+}
+
+@Test func traversalWalkEventsRespectOrderingSkipAndStop() throws {
+    let tree = try makeTraversalTree()
+
+    let nodeWalk = tree.withRoot { root in
+        var events: [String] = []
+        let control = root.walkPreorder { event in
+            events.append(describeNodeWalkEvent(event))
+            return .continue
+        }
+        return (events, control)
+    }
+    #expect(nodeWalk.1 == .continue)
+    #expect(nodeWalk.0 == [
+        "enter:root:a b c + d + e + f z",
+        "enter:list:b c + d + e",
+        "enter:list:c + d",
+        "leave:list:c + d",
+        "enter:list:e",
+        "leave:list:e",
+        "leave:list:b c + d + e",
+        "enter:list:f",
+        "leave:list:f",
+        "leave:root:a b c + d + e + f z",
+    ])
+
+    let tokenWalk = tree.withRoot { root in
+        root.withDescendant(atPath: [2, 2]) { inner in
+            var events: [String] = []
+            let control = inner.walkPreorderWithTokens { event in
+                events.append(describeElementWalkEvent(event))
+                return .continue
+            }
+            return (events, control)
+        }!
+    }
+    #expect(tokenWalk.1 == .continue)
+    #expect(tokenWalk.0 == [
+        "enter:node:list:c + d",
+        "enter:token:identifier:c@4",
+        "leave:token:identifier:c@4",
+        "enter:token:whitespace: @5",
+        "leave:token:whitespace: @5",
+        "enter:token:plus:+@6",
+        "leave:token:plus:+@6",
+        "enter:token:whitespace: @7",
+        "leave:token:whitespace: @7",
+        "enter:token:identifier:d@8",
+        "leave:token:identifier:d@8",
+        "leave:node:list:c + d",
+    ])
+
+    let skipWalk = tree.withRoot { root in
+        var events: [String] = []
+        let control = root.walkPreorder { event in
+            let label = describeNodeWalkEvent(event)
+            events.append(label)
+            if label == "enter:list:b c + d + e" {
+                return .skipChildren
+            }
+            return .continue
+        }
+        return (events, control)
+    }
+    #expect(skipWalk.1 == .continue)
+    #expect(skipWalk.0 == [
+        "enter:root:a b c + d + e + f z",
+        "enter:list:b c + d + e",
+        "leave:list:b c + d + e",
+        "enter:list:f",
+        "leave:list:f",
+        "leave:root:a b c + d + e + f z",
+    ])
+
+    let stopWalk = tree.withRoot { root in
+        var events: [String] = []
+        let control = root.walkPreorder { event in
+            let label = describeNodeWalkEvent(event)
+            events.append(label)
+            if label == "enter:list:b c + d + e" {
+                return .stop
+            }
+            return .continue
+        }
+        return (events, control)
+    }
+    #expect(stopWalk.1 == .stop)
+    #expect(stopWalk.0 == [
+        "enter:root:a b c + d + e + f z",
+        "enter:list:b c + d + e",
+    ])
 }
 
 @Test func anchorsResolveAndReplacementRebuildsAncestorPath() throws {
