@@ -7,7 +7,7 @@ refactor. A2/A3 are now resolved by cached node-child counts and running
 child-start offsets during traversal. B2 remains open, but is downgraded to a
 cold-path contention and benchmark question rather than a hot-read defect. The
 remaining critical correctness concerns are the silent correctness bugs in
-A5/A6/A8/A9.
+A5/A6.
 
 ---
 
@@ -110,7 +110,7 @@ It is correct only when the builder shares the source tree's resolver verbatim (
 
 The four-step anchor-resolution ladder relied on a hardcoded 64-byte tolerance for its final fallback. Resolved by replacing the entire `SyntaxAnchor` / `SharedSyntaxTree.resolve(_:_:)` mechanism with a witness-based design: edits return `ReplacementWitness` and incremental parses return `ParseWitness`, both pure structural descriptions of what changed. Cross-tree identity tracking is now externalized — there is no in-library "find this node again by fingerprint" path, so no magic-number tolerance. See `WITNESS.md` for the design.
 
-### A8. `SharedTokenInterner` shard encoding silently overflows after 16 M tokens per shard
+### A8. Fixed: `SharedTokenInterner` shard encoding silently overflowed after 16 M tokens per shard
 
 **Where:** `GreenTreeBuilder.swift:105`:
 
@@ -118,15 +118,13 @@ The four-step anchor-resolution ladder relied on a hardcoded 64-byte tolerance f
 let key = TokenKey(UInt32(shardIndex << 24 | shard.textByKey.count))
 ```
 
-Shard ID lives in the high 8 bits, local index in the low 24 — capped at 2²⁴ ≈ 16.7 M tokens per shard. With 8 shards, total ≈ 134 M. Beyond that, `shard.textByKey.count` overflows past `0x00ff_ffff` and the OR aliases the shard ID, returning a key that resolves to a *different shard's* string. No assertion, no error.
+Shard ID lives in the high 8 bits, local index in the low 24 — capped at 2²⁴ ≈ 16.7 M tokens per shard. With 8 shards, total ≈ 134 M. Beyond that, `shard.textByKey.count` used to overflow past `0x00ff_ffff` and alias the shard ID, returning a key that resolved to a *different shard's* string.
 
-cstree's interner returns `InternerError::KeySpaceExhausted` (`interning/default_interner.rs:71-79`). Cambium silently corrupts.
+Fixed by centralizing the 8/24 key layout in `SharedTokenInternerKeyLayout`, constraining `shardCount` to 1...256, and trapping before appending when a shard's 24-bit local key space is exhausted. This preserves the current runtime-local key representation while removing silent corruption.
 
-**Fix sketch:** trap or throw when `shard.textByKey.count >= 0x0100_0000`; or use 16/16 splits and fewer shards; or use the full 32 bits with a separate `shardIndex` array.
+### A9. Fixed: `SharedTokenInterner.intern` used `abs(keyBytes.hashValue)` for sharding
 
-### A9. `SharedTokenInterner.intern` uses `abs(keyBytes.hashValue)` for sharding
-
-**Where:** `GreenTreeBuilder.swift:100`. `abs(Int.min)` traps. Hash values can in principle land on `Int.min`. Easily fixed with `keyBytes.hashValue & Int.max` or `UInt(bitPattern: keyBytes.hashValue) % UInt(shards.count)`.
+**Where:** historical `GreenTreeBuilder.swift:100`. `abs(Int.min)` traps. Hash values can in principle land on `Int.min`. Fixed by selecting the shard with `UInt(bitPattern: keyBytes.hashValue) % UInt(shards.count)`.
 
 ### A10. The cache cannot be reused across builders
 
@@ -214,7 +212,7 @@ Spec §25.4 prescribes "maximum bytes; maximum entries; eviction strategy; instr
 | D8 | `WalkEvent::map` | None | Minor convenience |
 | D9 | Display/Debug on cursors and handles | only test-only `debugTree` in `CambiumTesting` | Roadmap Priority 8 covers debug rendering but not Display |
 | D10 | `SyntaxNode::write_display` (streaming render) | only `makeString` (allocating) | Cambium has `writeUTF8` on `SyntaxText`, but not as a node convenience |
-| D11 | Interner `KeySpaceExhausted` error | silent overflow / aliased keys (A8) | |
+| D11 | Interner `KeySpaceExhausted` error | explicit precondition before shard-local exhaustion (A8 fixed) | Nonthrowing API choice |
 | D12 | `Direction` enum reused across siblings/walks | `TraversalDirection` exists but is only used in `forEachSibling` variants | OK but inconsistent surface |
 | D13 | `arity()` (O(N)) and `arity_with_tokens()` (O(1)) | node count and child-or-token count are O(1) | |
 | D14 | Replacement at root | works (replacement IS the root, no rebuild) | OK in Cambium too — but path is `if path.isEmpty` (`GreenTreeBuilder.swift:633`); fine |
@@ -229,7 +227,7 @@ Spec §25.4 prescribes "maximum bytes; maximum entries; eviction strategy; instr
 - **No cross-interner `reuseSubtree` test.** A6 hides because tests don't reuse a subtree from a tree with a different interner.
 - **Wide-node traversal coverage is now present.** A focused mixed node/token
   test covers the A2/A3 offset and node-count regression surface.
-- **No SharedTokenInterner stress tests.** A8 / A9 invisible.
+- **SharedTokenInterner key-layout coverage is present.** Focused tests cover A8/A9 without allocating 16 M strings.
 - **A7 is gone**: anchors no longer exist; `WitnessTests.swift` covers the witness-based replacement contract that replaces them.
 - **No `builder.token(.plus, text: "X")` test.** D3 invisible.
 - **No `walkPreorderWithTokens` skip/stop test.** Test uses skip on node-only walk only.
@@ -238,10 +236,10 @@ Spec §25.4 prescribes "maximum bytes; maximum entries; eviction strategy; instr
 
 ## Recommended priority
 
-1. **A5, A6, A8, A9** — silent correctness bugs that will eventually bite real users.
+1. **A5, A6** — silent correctness bugs that will eventually bite real users.
 2. **A10** — operational gap that limits incremental parsing usefulness. (A4 fixed; A7 removed by witness redesign.)
 3. **B4** — benchmark repeated random lookups on wide nodes before adding an offset table.
 4. **C-series spec fixes** — update arch doc to make `TokenAtOffset.Between`, `missing`-as-distinct-storage, and lock-free read goals explicit, so future contributors don't re-derive the wrong constraints.
 5. **D-series and roadmap** — most of D maps onto roadmap priorities 2/3; D1, D2, D3 should be added.
 
-Cambium's *shape* matches the architecture spec well — green/red split, noncopyable builder, witness-based cross-tree identity, replacement, serialization, macro-derived kinds. Where it still diverges is mostly invisible from happy-path tests (A5, A6) and stress limits (A8, A9). A focused pass on the remaining silent correctness bugs would close the largest gaps with the spec without re-architecting.
+Cambium's *shape* matches the architecture spec well — green/red split, noncopyable builder, witness-based cross-tree identity, replacement, serialization, macro-derived kinds. Where it still diverges is mostly invisible from happy-path tests (A5, A6). A focused pass on the remaining silent correctness bugs would close the largest gaps with the spec without re-architecting.

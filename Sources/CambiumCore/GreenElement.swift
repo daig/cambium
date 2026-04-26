@@ -1,3 +1,10 @@
+/// Runtime-local key for dynamically interned token text.
+///
+/// A token key is meaningful only with the `TokenResolver` or interner that
+/// produced the tree containing it. The raw value is not a durable,
+/// cross-process, or serialized identity; green snapshot serialization
+/// canonicalizes token text into snapshot-local tables instead of preserving
+/// runtime keys.
 public struct TokenKey: RawRepresentable, Sendable, Hashable, Comparable {
     public let rawValue: UInt32
 

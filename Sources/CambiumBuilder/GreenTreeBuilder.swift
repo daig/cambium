@@ -73,6 +73,43 @@ public struct LocalTokenInterner: ~Copyable {
     }
 }
 
+enum SharedTokenInternerKeyLayout {
+    static let shardBits = 8
+    static let localBits = 24
+    static let maxShardCount = 1 << shardBits
+    static let maxLocalEntriesPerShard = 1 << localBits
+    static let localIndexMask: UInt32 = 0x00ff_ffff
+
+    static func shardIndex(forHash hash: Int, shardCount: Int) -> Int {
+        precondition(shardCount > 0, "SharedTokenInterner requires at least one shard")
+        return Int(UInt(bitPattern: hash) % UInt(shardCount))
+    }
+
+    static func makeKey(shardIndex: Int, localIndex: Int) -> TokenKey? {
+        guard shardIndex >= 0,
+              shardIndex < maxShardCount,
+              localIndex >= 0,
+              localIndex < maxLocalEntriesPerShard
+        else {
+            return nil
+        }
+        return TokenKey((UInt32(shardIndex) << UInt32(localBits)) | UInt32(localIndex))
+    }
+
+    static func decode(_ key: TokenKey) -> (shardIndex: Int, localIndex: Int) {
+        (
+            shardIndex: Int(key.rawValue >> UInt32(localBits)),
+            localIndex: Int(key.rawValue & localIndexMask)
+        )
+    }
+}
+
+/// Thread-safe token interner with sharded storage.
+///
+/// `TokenKey` values produced by this interner are runtime-local to this
+/// resolver. The current encoding uses the high 8 bits for the shard index and
+/// the low 24 bits for the per-shard local index, so at most 256 shards and
+/// 16,777,216 distinct token texts per shard are representable.
 public final class SharedTokenInterner: TokenResolver, @unchecked Sendable {
     struct Shard {
         var keysByText: [[UInt8]: TokenKey] = [:]
@@ -83,6 +120,10 @@ public final class SharedTokenInterner: TokenResolver, @unchecked Sendable {
 
     public init(shardCount: Int = 8) {
         precondition(shardCount > 0, "SharedTokenInterner requires at least one shard")
+        precondition(
+            shardCount <= SharedTokenInternerKeyLayout.maxShardCount,
+            "SharedTokenInterner supports at most \(SharedTokenInternerKeyLayout.maxShardCount) shards"
+        )
         self.shards = (0..<shardCount).map { _ in
             MutexBox(Shard())
         }
@@ -97,12 +138,22 @@ public final class SharedTokenInterner: TokenResolver, @unchecked Sendable {
 
     public func intern(_ bytes: UnsafeBufferPointer<UInt8>) -> TokenKey {
         let keyBytes = Array(bytes)
-        let shardIndex = abs(keyBytes.hashValue) % shards.count
+        let shardIndex = SharedTokenInternerKeyLayout.shardIndex(
+            forHash: keyBytes.hashValue,
+            shardCount: shards.count
+        )
         return shards[shardIndex].mutex.withLock { shard in
             if let key = shard.keysByText[keyBytes] {
                 return key
             }
-            let key = TokenKey(UInt32(shardIndex << 24 | shard.textByKey.count))
+            guard let key = SharedTokenInternerKeyLayout.makeKey(
+                shardIndex: shardIndex,
+                localIndex: shard.textByKey.count
+            ) else {
+                preconditionFailure(
+                    "SharedTokenInterner shard \(shardIndex) exhausted its \(SharedTokenInternerKeyLayout.maxLocalEntriesPerShard)-entry key space"
+                )
+            }
             shard.keysByText[keyBytes] = key
             shard.textByKey.append(String(decoding: bytes, as: UTF8.self))
             return key
@@ -110,8 +161,7 @@ public final class SharedTokenInterner: TokenResolver, @unchecked Sendable {
     }
 
     public func resolve(_ key: TokenKey) -> String {
-        let shardIndex = Int(key.rawValue >> 24)
-        let localIndex = Int(key.rawValue & 0x00ff_ffff)
+        let (shardIndex, localIndex) = SharedTokenInternerKeyLayout.decode(key)
         precondition(shards.indices.contains(shardIndex), "Unknown shared token key \(key.rawValue)")
         return shards[shardIndex].mutex.withLock { shard in
             precondition(shard.textByKey.indices.contains(localIndex), "Unknown shared token key \(key.rawValue)")

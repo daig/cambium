@@ -550,6 +550,10 @@ public struct TokenKey: RawRepresentable, Hashable, Sendable {
 }
 ```
 
+`TokenKey.rawValue` is resolver/interner-local. It is meaningful only with the
+resolver that produced the tree or build result, and must not be treated as a
+durable serialized identity.
+
 ### 10.2 Resolver/interner split
 
 Use a split similar to `cstree`: builders need an interner; finished trees need only a resolver.
@@ -586,6 +590,8 @@ public final class SharedTokenInterner: TokenResolver, @unchecked Sendable {
 ```
 
 The default parser path should use `LocalTokenInterner`. Shared interning is optional and should be sharded if used heavily.
+The current shared interner uses an 8-bit shard / 24-bit local-index runtime key
+layout and traps before shard-local exhaustion rather than aliasing keys.
 
 Avoid global unbounded interners.
 
@@ -1519,7 +1525,7 @@ Serialize:
 - raw syntax kinds;
 - green node/token structure;
 - text lengths;
-- token interner table;
+- canonical token text tables;
 - static-text markers;
 - optional structural hashes;
 - format version and language ID.
@@ -1533,11 +1539,12 @@ Do not serialize:
 - parse-session caches;
 - borrowed cursors;
 - node handles.
+- runtime `TokenKey.rawValue` assignments.
 
 On load:
 
 1. reconstruct green storage;
-2. reconstruct resolver/interner table;
+2. reconstruct resolver tables with snapshot-local token keys;
 3. create a new `SyntaxTreeStorage` with a fresh red arena;
 4. realize root red node only.
 
