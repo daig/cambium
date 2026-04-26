@@ -467,6 +467,8 @@ struct ReplacementTokenRemapper<Lang: SyntaxLanguage> {
         switch token.textStorage {
         case .staticText:
             text = .staticText
+        case .missing:
+            text = .missing
         case .interned(let key):
             let mapped = internedMap[key] ?? {
                 let newKey = TokenKey(nextInterned)
@@ -597,7 +599,7 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
         children.append(.token(cache.makeToken(
             kind: Lang.rawKind(for: kind),
             textLength: .zero,
-            text: .staticText
+            text: .missing
         )))
     }
 

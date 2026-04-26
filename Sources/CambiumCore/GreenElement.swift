@@ -38,7 +38,13 @@ public struct LargeTokenTextID: RawRepresentable, Sendable, Hashable, Comparable
 }
 
 public enum TokenTextStorage: Sendable, Hashable {
+    /// Renders the kind's static text from `Lang.staticText(for:)`.
+    /// Token length must equal the static text's UTF-8 byte length.
     case staticText
+    /// A token of a kind that *would* have static text but is absent in the
+    /// source (an error-recovery placeholder). Renders as empty regardless
+    /// of the kind's static text. Token length must be zero.
+    case missing
     case interned(TokenKey)
     case ownedLargeText(LargeTokenTextID)
 }
@@ -140,6 +146,8 @@ internal enum GreenHash {
         case .ownedLargeText(let id):
             hash = mix(hash, 2)
             hash = mix(hash, UInt64(id.rawValue))
+        case .missing:
+            hash = mix(hash, 3)
         }
         return hash
     }
@@ -220,6 +228,9 @@ public struct GreenToken<Lang: SyntaxLanguage>: @unchecked Sendable, Hashable {
                 }
             }
             return try result.get()
+        case .missing:
+            let bytes = UnsafeBufferPointer<UInt8>(start: nil, count: 0)
+            return try body(bytes)
         case .interned(let key):
             return try resolver.withUTF8(key, body)
         case .ownedLargeText(let id):
@@ -236,6 +247,8 @@ public struct GreenToken<Lang: SyntaxLanguage>: @unchecked Sendable, Hashable {
             return text.withUTF8Buffer { bytes in
                 String(decoding: bytes, as: UTF8.self)
             }
+        case .missing:
+            return ""
         case .interned(let key):
             return resolver.resolve(key)
         case .ownedLargeText(let id):

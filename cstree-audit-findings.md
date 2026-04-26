@@ -6,8 +6,7 @@ Status update: A1/B1/B6 are now resolved by the lock-free red cursor read
 refactor. A2/A3 are now resolved by cached node-child counts and running
 child-start offsets during traversal. B2 remains open, but is downgraded to a
 cold-path contention and benchmark question rather than a hot-read defect. The
-remaining critical correctness concerns are the silent correctness bugs in
-A5/A6.
+remaining critical correctness concern is the silent correctness bug in A6.
 
 ---
 
@@ -79,13 +78,13 @@ changes after construction).
 
 Previously the oracle passed `TextSize.zero` to `recordReuseQuery(hitBytes:)`, leaving `IncrementalParseCounters.reusedBytes` permanently zero. Resolved by changing the private `firstReusableNode` helper to return `(R, TextSize)?` where the `TextSize` is the matched node's length, and threading that real length through to the counter. The semantics of `reusedBytes` now reflect *oracle offers*, not *parser acceptance* — the parser-driven accepted-reuse log (`recordAcceptedReuse` / `consumeAcceptedReuses`) is the authoritative count for what was actually reused.
 
-### A5. `missingToken(_:)` of a kind with static text renders as the static text
+### A5. Fixed: `missingToken(_:)` of a kind with static text rendered as the static text
 
-**Where:** `Sources/CambiumBuilder/GreenTreeBuilder.swift:544–552` creates a token with `text: .staticText` and `textLength: .zero`. `Sources/CambiumCore/GreenElement.swift:202–215` resolves `.staticText` by calling `Lang.staticText(for: kind)`. If that returns non-nil (e.g. `.plus → "+"`), the bytes "+" are streamed regardless of `textLength`. The token claims length 0 but renders 1 byte — the parent's aggregate `textLength` no longer matches its rendered text.
+**Where:** historical `Sources/CambiumBuilder/GreenTreeBuilder.swift` `missingToken(_:)`; `Sources/CambiumCore/GreenElement.swift` `withTextUTF8` / `makeString`.
 
-The test suite uses `.missing` (which has no static text, so the precondition path at line 205 catches it) and never exercises the buggy branch. Easily reproduced: `builder.missingToken(.plus)` followed by `tree.makeString()` produces a "+".
+Previously `missingToken(_:)` constructed tokens with `text: .staticText, textLength: .zero`. Resolution then dispatched on `.staticText`, called `Lang.staticText(for: kind)`, and streamed the resulting bytes — so a `missingToken(.plus)` rendered "+" while claiming zero length.
 
-**Fix sketch:** add a `case missing` to `TokenTextStorage`, or have `missingToken` validate `Lang.staticText(for: kind) == nil` and trap/throw otherwise. Encode "missing" as a distinct sentinel from `.staticText`.
+Resolved by adding a distinct `case missing` to `TokenTextStorage` (a sentinel meaning "absent"; renders as empty). `missingToken(_:)` now uses `.missing`, the structural hash mixes a fourth tag value to keep `.missing` and `.staticText` cache-distinct, and the snapshot serializer writes a new `missingText` tag so the distinction round-trips. `MissingTokenTests.swift` covers the rendering, hash distinction, and serialization round trip.
 
 ### A6. `GreenTreeBuilder.reuseSubtree` does not remap interner keys
 
@@ -184,9 +183,9 @@ The remaining gap is mostly spec/API shape, not the old implementation gap. The 
 
 cstree's `token_at_offset` (`syntax/node.rs:848`, `utility_types.rs:133`) returns `None | Single(T) | Between(T, T)`. The `Between` case occurs at exact token boundaries (cursor placement at a token gap is the canonical IDE situation). Cambium's `withToken(at:)` returns Optional, losing the disambiguation. No editor consumer can correctly select "the token to the left vs the token to the right of the cursor" without re-implementing the logic. This is a spec-level gap, not an implementation oversight.
 
-### C4. The spec didn't separate "static text" from "missing" in `TokenTextStorage` (arch §10.1)
+### C4. Resolved-in-implementation: separate "static text" from "missing" in `TokenTextStorage` (arch §10.1)
 
-Spec lists `staticText | interned(TokenKey) | ownedLargeText(LargeTokenTextID)`. The implementation faithfully kept this set. But "missing" is a different concept — an absent token of a kind that has static text. Conflating it into `.staticText + length 0` is exactly the bug at A5. Spec §8.2 mentions missing-token semantics (zero text length) but never says how to distinguish "missing" from "real static text" at storage level.
+Spec listed `staticText | interned(TokenKey) | ownedLargeText(LargeTokenTextID)` and conflated "missing" with `.staticText + length 0`, which produced bug A5. The implementation now adds a distinct `case missing` to `TokenTextStorage`. The architecture doc §10.1 should be updated to describe the four-case storage model.
 
 ### C5. Resolved in implementation: the spec said `node.kind`, `node.textRange`, `token.text` "must not actor-hop" but never said "must not lock"
 
@@ -223,7 +222,7 @@ Spec §25.4 prescribes "maximum bytes; maximum entries; eviction strategy; instr
 ## E. Test coverage gaps that mask the bugs above
 
 - **Concurrency coverage is still incomplete.** A1/B1 now have focused concurrent lazy-realization coverage, but A6, shared interner/cache contention, and broader Thread Sanitizer coverage still need CI-level follow-through. Arch §28 #8/#9 listed "Concurrent traversal tests" and "Thread Sanitizer suite" as required.
-- **No `missingToken(.plus)`-style test.** A5 hides because every test uses `.missing` (no static text).
+- **`missingToken(.plus)`-style coverage is present.** `MissingTokenTests.swift` covers A5 directly: empty rendering, structural-hash distinction from the static-text variant, and serialization round-trip.
 - **No cross-interner `reuseSubtree` test.** A6 hides because tests don't reuse a subtree from a tree with a different interner.
 - **Wide-node traversal coverage is now present.** A focused mixed node/token
   test covers the A2/A3 offset and node-count regression surface.
@@ -236,10 +235,10 @@ Spec §25.4 prescribes "maximum bytes; maximum entries; eviction strategy; instr
 
 ## Recommended priority
 
-1. **A5, A6** — silent correctness bugs that will eventually bite real users.
+1. **A6** — silent correctness bug that will eventually bite real users. (A5 fixed.)
 2. **A10** — operational gap that limits incremental parsing usefulness. (A4 fixed; A7 removed by witness redesign.)
 3. **B4** — benchmark repeated random lookups on wide nodes before adding an offset table.
 4. **C-series spec fixes** — update arch doc to make `TokenAtOffset.Between`, `missing`-as-distinct-storage, and lock-free read goals explicit, so future contributors don't re-derive the wrong constraints.
 5. **D-series and roadmap** — most of D maps onto roadmap priorities 2/3; D1, D2, D3 should be added.
 
-Cambium's *shape* matches the architecture spec well — green/red split, noncopyable builder, witness-based cross-tree identity, replacement, serialization, macro-derived kinds. Where it still diverges is mostly invisible from happy-path tests (A5, A6). A focused pass on the remaining silent correctness bugs would close the largest gaps with the spec without re-architecting.
+Cambium's *shape* matches the architecture spec well — green/red split, noncopyable builder, witness-based cross-tree identity, replacement, serialization, macro-derived kinds. Where it still diverges is mostly invisible from happy-path tests (A6). A focused pass on the remaining silent correctness bug would close the largest gap with the spec without re-architecting.

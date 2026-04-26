@@ -33,6 +33,7 @@ private enum GreenSnapshotFormat {
     static let staticText: UInt8 = 0
     static let internedText: UInt8 = 1
     static let largeText: UInt8 = 2
+    static let missingText: UInt8 = 3
 }
 
 private struct BinaryWriter {
@@ -146,6 +147,7 @@ private struct BinaryReader {
 
 private enum EncodedTextStorage: Hashable {
     case staticText
+    case missing
     case interned(UInt32)
     case large(UInt32)
 }
@@ -262,6 +264,10 @@ private struct GreenSnapshotEncoder<Lang: SyntaxLanguage> {
             try validateStaticTokenLength(token)
             encodedStorage = .staticText
             canonicalStorage = .staticText
+        case .missing:
+            try validateMissingTokenLength(token)
+            encodedStorage = .missing
+            canonicalStorage = .missing
         case .interned(let key):
             let text = resolver.resolve(key)
             try validateDynamicTokenLength(token, text: text)
@@ -335,6 +341,16 @@ private struct GreenSnapshotEncoder<Lang: SyntaxLanguage> {
         }
     }
 
+    private func validateMissingTokenLength(_ token: GreenToken<Lang>) throws {
+        guard token.textLength == .zero else {
+            throw CambiumSerializationError.staticTextLengthMismatch(
+                kind: token.rawKind,
+                expected: token.textLength,
+                actual: .zero
+            )
+        }
+    }
+
     private func validateDynamicTokenLength(_ token: GreenToken<Lang>, text: String) throws {
         let actual = try TextSize(byteCountOf: text)
         guard actual == token.textLength else {
@@ -356,6 +372,8 @@ private struct GreenSnapshotEncoder<Lang: SyntaxLanguage> {
             switch text {
             case .staticText:
                 writer.writeUInt8(GreenSnapshotFormat.staticText)
+            case .missing:
+                writer.writeUInt8(GreenSnapshotFormat.missingText)
             case .interned(let index):
                 writer.writeUInt8(GreenSnapshotFormat.internedText)
                 writer.writeUInt32(index)
@@ -378,6 +396,7 @@ private struct GreenSnapshotEncoder<Lang: SyntaxLanguage> {
 
 private enum DecodedTextStorage {
     case staticText
+    case missing
     case interned(UInt32)
     case large(UInt32)
 }
@@ -509,6 +528,13 @@ private struct GreenSnapshotDecodedTreeBuilder<Lang: SyntaxLanguage> {
                     structuralHash: structuralHash,
                     text: .staticText
                 )
+            case GreenSnapshotFormat.missingText:
+                return .token(
+                    rawKind: rawKind,
+                    textLength: textLength,
+                    structuralHash: structuralHash,
+                    text: .missing
+                )
             case GreenSnapshotFormat.internedText:
                 return .token(
                     rawKind: rawKind,
@@ -611,6 +637,9 @@ private struct GreenSnapshotDecodedTreeBuilder<Lang: SyntaxLanguage> {
         case .staticText:
             try validateStaticTokenLength(rawKind: rawKind, textLength: textLength)
             storage = .staticText
+        case .missing:
+            try validateMissingTokenLength(rawKind: rawKind, textLength: textLength)
+            storage = .missing
         case .interned(let index):
             guard let intIndex = Int(exactly: index), internedTexts.indices.contains(intIndex) else {
                 throw CambiumSerializationError.invalidTokenReference(index)
@@ -659,6 +688,16 @@ private struct GreenSnapshotDecodedTreeBuilder<Lang: SyntaxLanguage> {
                 kind: rawKind,
                 expected: textLength,
                 actual: actual
+            )
+        }
+    }
+
+    private func validateMissingTokenLength(rawKind: RawSyntaxKind, textLength: TextSize) throws {
+        guard textLength == .zero else {
+            throw CambiumSerializationError.staticTextLengthMismatch(
+                kind: rawKind,
+                expected: textLength,
+                actual: .zero
             )
         }
     }
