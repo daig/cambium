@@ -12,8 +12,8 @@ final class MutexBox<Value>: @unchecked Sendable {
 public enum GreenCachePolicy: Sendable, Hashable {
     case disabled
     case documentLocal
-    case parseSession(maxBytes: Int)
-    case shared(maxBytes: Int)
+    case parseSession(maxEntries: Int)
+    case shared(maxEntries: Int)
 
     var maxEntries: Int {
         switch self {
@@ -21,8 +21,8 @@ public enum GreenCachePolicy: Sendable, Hashable {
             0
         case .documentLocal:
             16_384
-        case .parseSession(let maxBytes), .shared(let maxBytes):
-            max(128, maxBytes / 128)
+        case .parseSession(let maxEntries), .shared(let maxEntries):
+            maxEntries
         }
     }
 }
@@ -198,16 +198,34 @@ struct NodeCacheKey: Hashable {
     var structuralHash: UInt64
 }
 
+private enum GreenCacheEntryKey: Hashable {
+    case token(TokenCacheKey)
+    case node(NodeCacheKey)
+}
+
 final class GreenNodeCacheStorage<Lang: SyntaxLanguage>: @unchecked Sendable {
+    private static var nodeCacheChildThreshold: Int {
+        3
+    }
+
     let policy: GreenCachePolicy
     var tokenCache: [TokenCacheKey: GreenToken<Lang>] = [:]
     var nodeCache: [NodeCacheKey: [GreenNode<Lang>]] = [:]
+    private var evictionQueue: [GreenCacheEntryKey] = []
+    private var evictionHead: Int = 0
     let interner: LocalTokenInternerStorage
     var hits: Int = 0
     var misses: Int = 0
+    var bypasses: Int = 0
     var evictions: Int = 0
 
     init(policy: GreenCachePolicy, interner: LocalTokenInternerStorage = LocalTokenInternerStorage()) {
+        switch policy {
+        case .disabled, .documentLocal:
+            break
+        case .parseSession(let maxEntries), .shared(let maxEntries):
+            precondition(maxEntries > 0, "Green cache entry limit must be positive")
+        }
         self.policy = policy
         self.interner = interner
     }
@@ -216,25 +234,63 @@ final class GreenNodeCacheStorage<Lang: SyntaxLanguage>: @unchecked Sendable {
         policy.maxEntries > 0
     }
 
+    func isNodeCacheEligible(childCount: Int) -> Bool {
+        childCount <= Self.nodeCacheChildThreshold
+    }
+
+    func recordTokenInsertion(for key: TokenCacheKey) {
+        if tokenCache[key] == nil {
+            evictionQueue.append(.token(key))
+        }
+    }
+
+    func recordNodeInsertion(for key: NodeCacheKey) {
+        if nodeCache[key] == nil {
+            evictionQueue.append(.node(key))
+        }
+    }
+
     func trimIfNeeded() {
         guard isEnabled else {
             tokenCache.removeAll(keepingCapacity: false)
             nodeCache.removeAll(keepingCapacity: false)
+            evictionQueue.removeAll(keepingCapacity: false)
+            evictionHead = 0
             return
         }
 
         let maxEntries = policy.maxEntries
         while tokenCache.count + nodeCache.count > maxEntries {
-            if let key = tokenCache.keys.first {
-                tokenCache.removeValue(forKey: key)
-                evictions += 1
-            } else if let key = nodeCache.keys.first {
-                nodeCache.removeValue(forKey: key)
-                evictions += 1
-            } else {
+            guard evictionHead < evictionQueue.count else {
                 break
             }
+
+            let key = evictionQueue[evictionHead]
+            evictionHead += 1
+
+            switch key {
+            case .token(let key):
+                guard tokenCache.removeValue(forKey: key) != nil else {
+                    continue
+                }
+                evictions += 1
+            case .node(let key):
+                guard nodeCache.removeValue(forKey: key) != nil else {
+                    continue
+                }
+                evictions += 1
+            }
         }
+
+        compactEvictionQueueIfNeeded()
+    }
+
+    private func compactEvictionQueueIfNeeded() {
+        guard evictionHead > 1_024, evictionHead * 2 > evictionQueue.count else {
+            return
+        }
+        evictionQueue.removeFirst(evictionHead)
+        evictionHead = 0
     }
 }
 
@@ -259,6 +315,10 @@ public struct GreenNodeCache<Lang: SyntaxLanguage>: ~Copyable {
 
     public var missCount: Int {
         storage.misses
+    }
+
+    public var bypassCount: Int {
+        storage.bypasses
     }
 
     public var evictionCount: Int {
@@ -286,17 +346,21 @@ public struct GreenNodeCache<Lang: SyntaxLanguage>: ~Copyable {
         text: TokenTextStorage = .staticText
     ) -> GreenToken<Lang> {
         let key = TokenCacheKey(rawKind: kind, textLength: textLength, text: text)
-        if storage.isEnabled, let cached = storage.tokenCache[key] {
+        guard storage.isEnabled else {
+            storage.bypasses += 1
+            return GreenToken<Lang>(kind: kind, textLength: textLength, text: text)
+        }
+
+        if let cached = storage.tokenCache[key] {
             storage.hits += 1
             return cached
         }
 
         storage.misses += 1
         let token = GreenToken<Lang>(kind: kind, textLength: textLength, text: text)
-        if storage.isEnabled {
-            storage.tokenCache[key] = token
-            storage.trimIfNeeded()
-        }
+        storage.recordTokenInsertion(for: key)
+        storage.tokenCache[key] = token
+        storage.trimIfNeeded()
         return token
     }
 
@@ -305,6 +369,11 @@ public struct GreenNodeCache<Lang: SyntaxLanguage>: ~Copyable {
         children: [GreenElement<Lang>]
     ) throws -> GreenNode<Lang> {
         let candidate = try GreenNode<Lang>(kind: kind, children: children)
+        guard storage.isEnabled, storage.isNodeCacheEligible(childCount: candidate.childCount) else {
+            storage.bypasses += 1
+            return candidate
+        }
+
         let key = NodeCacheKey(
             rawKind: candidate.rawKind,
             textLength: candidate.textLength,
@@ -312,7 +381,7 @@ public struct GreenNodeCache<Lang: SyntaxLanguage>: ~Copyable {
             structuralHash: candidate.structuralHash
         )
 
-        if storage.isEnabled, let bucket = storage.nodeCache[key] {
+        if let bucket = storage.nodeCache[key] {
             for existing in bucket where existing == candidate {
                 storage.hits += 1
                 return existing
@@ -320,10 +389,9 @@ public struct GreenNodeCache<Lang: SyntaxLanguage>: ~Copyable {
         }
 
         storage.misses += 1
-        if storage.isEnabled {
-            storage.nodeCache[key, default: []].append(candidate)
-            storage.trimIfNeeded()
-        }
+        storage.recordNodeInsertion(for: key)
+        storage.nodeCache[key, default: []].append(candidate)
+        storage.trimIfNeeded()
         return candidate
     }
 
@@ -335,7 +403,7 @@ public struct GreenNodeCache<Lang: SyntaxLanguage>: ~Copyable {
 public final class SharedGreenNodeCache<Lang: SyntaxLanguage>: @unchecked Sendable {
     private let shards: [MutexBox<GreenNodeCacheStorage<Lang>>]
 
-    public init(policy: GreenCachePolicy = .shared(maxBytes: 16 * 1024 * 1024), shardCount: Int = 8) {
+    public init(policy: GreenCachePolicy = .shared(maxEntries: 16_384), shardCount: Int = 8) {
         precondition(shardCount > 0, "SharedGreenNodeCache requires at least one shard")
         self.shards = (0..<shardCount).map { _ in
             MutexBox(GreenNodeCacheStorage(policy: policy))

@@ -149,9 +149,11 @@ What remains under `RedArena.state.withLock` is the cold path: allocating slot s
 
 So B2 no longer describes a hot-path design violation. It is an open concurrency/performance proof item: keep the global lock until cold parallel traversal benchmarks, broader stress tests, or Thread Sanitizer runs show that striped or per-parent locks are worth the extra complexity.
 
-### B3. No per-node-size cache threshold
+### B3. Resolved: node cache has a cstree-style size threshold
 
-Spec §12.3: "Cache aggressively: small green nodes; medium nodes below a configurable threshold. Avoid caching huge nodes by default." cstree caches only nodes with ≤3 children (`green/builder.rs:27`, `CHILDREN_CACHE_THRESHOLD`); larger nodes bypass the cache because hit rate is low. Cambium caches every node and trims by FIFO (`GreenTreeBuilder.swift:171–181`). FIFO eviction over arbitrary dictionary order means hot small nodes can be evicted while cold wide nodes survive.
+Spec §12.3: "Cache aggressively: small green nodes; medium nodes below a configurable threshold. Avoid caching huge nodes by default." cstree caches only nodes with ≤3 children (`green/builder.rs:27`, `CHILDREN_CACHE_THRESHOLD`); larger nodes bypass the cache because hit rate is low. Previously, Cambium cached every node and trimmed by dictionary-order key selection, so hot small nodes could be evicted while cold wide nodes survived.
+
+Cambium now follows the cstree default eligibility rule for v1: tokens are cacheable whenever the cache is enabled, but green nodes are cacheable only when they have at most three children. Wider nodes bypass cache lookup and insertion, so they no longer consume bounded cache slots or evict small reusable entries. The fixed threshold is intentionally private; configurable or per-kind thresholds remain part of a later cache-policy overhaul.
 
 ### B4. No offset table for wide nodes
 
@@ -193,9 +195,11 @@ Spec previously listed `staticText | interned(TokenKey) | ownedLargeText(LargeTo
 
 Avoiding actors is necessary but insufficient. The original implementation chose mutex-protected reads, which were not actor-isolated but were still synchronisation points. The A1 fix corrected the implementation by making cursor reads and realized-child reads lock-free. The spec should still be clarified: the performance goals (§3.2: "no per-node ARC traffic", "no per-red-node class allocation") implicitly assumed lock-free reads, but did not say so directly.
 
-### C6. Spec promised "predictable copying/sharing"; the cache eviction is unpredictable
+### C6. Resolved: cache eviction is deterministic FIFO
 
-Spec §25.4 prescribes "maximum bytes; maximum entries; eviction strategy; instrumentation counters". Implementation has the counters and a max-entries policy, but eviction key choice is `dict.keys.first` — Swift dictionary iteration order is unspecified across versions and after rehashing. Two builds with identical inputs can produce different cache contents. Spec §25.4's "predictable" goal is unmet.
+Spec §25.4 prescribes "maximum bytes; maximum entries; eviction strategy; instrumentation counters". The previous implementation had counters and a max-entries policy, but eviction key choice was `dict.keys.first` — Swift dictionary iteration order is unspecified across versions and after rehashing. Two builds with identical inputs could produce different cache contents.
+
+Cambium now maintains an explicit FIFO queue across token and node cache entries. A key is appended only when a new cache entry is first inserted, and trimming evicts the oldest still-live entry until the combined token/node entry count is within the configured bound. `hitCount`, `missCount`, `bypassCount`, and `evictionCount` distinguish cache hits, eligible misses, disabled/too-wide bypasses, and deterministic evictions.
 
 ---
 
@@ -242,9 +246,7 @@ Spec §25.4 prescribes "maximum bytes; maximum entries; eviction strategy; instr
 2. **Incremental reuse oracle maturity** — upgrade matching beyond start
    offset/kind to account for edit invalidation, ranges, and green hashes, then
    document parser acceptance as the authoritative reuse signal.
-3. **B3/C6** — replace dictionary-order cache eviction and decide whether to
-   bias caching toward small nodes as cstree does.
-4. **B2/B4/B5** — benchmark before changing: cold red-realization locking, wide
+3. **B2/B4/B5** — benchmark before changing: cold red-realization locking, wide
    node offset tables, and ARC traffic from copyable green wrappers are
    performance proof items, not current correctness bugs.
 

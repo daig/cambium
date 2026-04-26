@@ -813,19 +813,22 @@ Cache policy:
 public enum GreenCachePolicy: Sendable {
     case disabled
     case documentLocal
-    case parseSession(maxBytes: Int)
-    case shared(maxBytes: Int)
+    case parseSession(maxEntries: Int)
+    case shared(maxEntries: Int)
 }
 ```
 
 Cache aggressively:
 
-- static tokens;
-- repeated dynamic tokens;
-- small green nodes;
-- medium nodes below a configurable threshold.
+- all tokens when the cache is enabled;
+- small green nodes with at most three children.
 
-Avoid caching huge nodes by default.
+Avoid caching huge nodes by default. Cambium's v1 cache policy uses an
+entry-count bound, not byte-accurate accounting: `documentLocal` is fixed at
+16,384 entries, while parse-session and shared caches take explicit positive
+`maxEntries` values. The current node threshold is private and fixed to match
+cstree's default. Byte-accurate budgets, configurable node thresholds, and
+pluggable policy are deferred to the broader cache-policy overhaul.
 
 ### 12.4 Shared cache
 
@@ -1659,13 +1662,16 @@ Build such tables only when child count exceeds a threshold or repeated point lo
 
 Every cache should have a budget:
 
-- maximum bytes;
 - maximum entries;
+- maximum bytes, when byte accounting is implemented;
 - optional per-kind thresholds;
 - eviction strategy;
 - instrumentation counters.
 
-Caches must never be globally unbounded.
+Cambium's current green cache budget is entry-based and deterministic: cache
+entries are evicted by explicit FIFO order, and cache statistics distinguish
+eligible hits, eligible misses, bypasses, and evictions. Caches must never be
+globally unbounded.
 
 ### 25.5 Benchmark targets
 
@@ -1689,7 +1695,7 @@ Create benchmark suites for:
 ### 26.1 Parse and traverse
 
 ```swift
-var cache = GreenNodeCache<MyLang>(policy: .parseSession(maxBytes: 64 * 1024 * 1024))
+var cache = GreenNodeCache<MyLang>(policy: .parseSession(maxEntries: 64 * 1024))
 var builder = GreenTreeBuilder<MyLang>(cache: consume cache)
 
 parser.parse(into: &builder)

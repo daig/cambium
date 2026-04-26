@@ -154,16 +154,18 @@ Acceptance criteria:
 
 ## Priority 5: Interner And Cache Maturity
 
-Cambium has local and shared interning plus green caches, but cache policy and
-interner pluggability are still early.
+Cambium has local and shared interning plus green caches. The green cache is
+now bounded by entry count, uses deterministic FIFO eviction, caches all tokens
+when enabled, and applies cstree's default small-node threshold of at most
+three children. Cache policy and interner pluggability are still early.
 
 Incremental work:
 
 1. Add clearer APIs for supplying an existing interner/resolver to builders.
 2. Decide whether third-party/custom interners need protocol-based integration.
-3. Replace approximate entry-count eviction with a better bounded policy.
-4. Track estimated bytes for cached nodes, tokens, and interned strings.
-5. Add cache statistics suitable for parser diagnostics and benchmarks.
+3. Track estimated bytes for cached nodes, tokens, and interned strings.
+4. Decide whether configurable or per-kind node cache thresholds are needed.
+5. Add richer cache statistics suitable for parser diagnostics and benchmarks.
 6. Stress test shared cache and shared interner concurrency.
 
 Acceptance criteria:
