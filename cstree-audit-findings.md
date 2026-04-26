@@ -205,7 +205,7 @@ Spec §25.4 prescribes "maximum bytes; maximum entries; eviction strategy; instr
 |---|---|---|---|
 | D1 | `TokenAtOffset` (None/Single/Between) | only Optional from `withToken(at:)` | Editor cursor placement at boundaries can't disambiguate |
 | D2 | Builder cache extraction after `finish` | `finish()` returns cache-preserving `GreenBuildResult` | OK |
-| D3 | Static-text validation in `builder.token(_:text:)` | None | cstree `debug_assert_eq!(static_text, text)` (`green/builder.rs:408`); silently allows mismatched-text static-kind tokens |
+| D3 | Static-text validation in `builder.token(_:text:)` | `token` and `largeToken` throw `staticKindRequiresStaticToken` for any kind whose `Lang.staticText(for:)` is non-nil | Stricter than cstree's `debug_assert_eq!`: static-kind tokens *must* go through `staticToken(_:)` |
 | D4 | Per-node user data type `D` | Sidecar `SyntaxMetadataStore` only | Different design choice, but no equivalent to `try_set_data` / `clear_data` directly on a node |
 | D5 | `siblings(direction)` returning a lazy iterator | callback-style `forEachSibling` | No `break`/`filter`/`collect` composition without buffer allocation |
 | D6 | `children_from(start_index, offset)` & `children_to(...)` | None | Useful for sibling enumeration starting mid-list |
@@ -230,25 +230,21 @@ Spec §25.4 prescribes "maximum bytes; maximum entries; eviction strategy; instr
   test covers the A2/A3 offset and node-count regression surface.
 - **SharedTokenInterner key-layout coverage is present.** Focused tests cover A8/A9 without allocating 16 M strings.
 - **A7 is gone**: anchors no longer exist; `WitnessTests.swift` covers the witness-based replacement contract that replaces them.
-- **No `builder.token(.plus, text: "X")` test.** D3 invisible.
+- **D3 coverage is present.** `BuilderStaticKindGuardTests.swift` covers the dynamic-text paths (`token`, `largeToken`, `token(_:bytes:)`) rejecting static-text kinds, plus regression guards that the dynamic kinds still work and that `staticToken(_:)` is unaffected.
 - **No `walkPreorderWithTokens` skip/stop test.** Test uses skip on node-only walk only.
 
 ---
 
 ## Recommended priority
 
-1. **D3** — validate or reject static-token kinds passed through
-   `builder.token(_:text:)`. This is the remaining small correctness trap: the
-   dynamic-token path can currently build a static-kind token with arbitrary
-   text.
-2. **D1/C3** — add `TokenAtOffset` with `none`, `single`, and `between` so IDE
+1. **D1/C3** — add `TokenAtOffset` with `none`, `single`, and `between` so IDE
    cursor-boundary queries are represented directly.
-3. **Incremental reuse oracle maturity** — upgrade matching beyond start
+2. **Incremental reuse oracle maturity** — upgrade matching beyond start
    offset/kind to account for edit invalidation, ranges, and green hashes, then
    document parser acceptance as the authoritative reuse signal.
-4. **B3/C6** — replace dictionary-order cache eviction and decide whether to
+3. **B3/C6** — replace dictionary-order cache eviction and decide whether to
    bias caching toward small nodes as cstree does.
-5. **B2/B4/B5** — benchmark before changing: cold red-realization locking, wide
+4. **B2/B4/B5** — benchmark before changing: cold red-realization locking, wide
    node offset tables, and ARC traffic from copyable green wrappers are
    performance proof items, not current correctness bugs.
 

@@ -373,6 +373,11 @@ public enum GreenTreeBuilderError: Error, Sendable, Equatable {
     case childIndexIsToken
     case staticTextUnavailable(RawSyntaxKind)
     case staticTextLengthOverflow
+    /// Raised when `token(_:text:)` or `largeToken(_:text:)` is called with a
+    /// kind whose `Lang.staticText(for:)` is non-nil. Static-text kinds belong
+    /// on the `staticToken(_:)` path; the dynamic-text paths are reserved for
+    /// kinds that don't have grammar-determined text.
+    case staticKindRequiresStaticToken(RawSyntaxKind)
 }
 
 struct OpenNode {
@@ -663,6 +668,9 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
 
     public mutating func token(_ kind: Lang.Kind, bytes: UnsafeBufferPointer<UInt8>) throws {
         precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
+        if Lang.staticText(for: kind) != nil {
+            throw GreenTreeBuilderError.staticKindRequiresStaticToken(Lang.rawKind(for: kind))
+        }
         var interner = LocalTokenInterner(storage: cacheStorage.interner)
         let key = interner.intern(bytes)
         let length = try TextSize(exactly: bytes.count)
@@ -676,6 +684,9 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
 
     public mutating func largeToken(_ kind: Lang.Kind, text: String) throws {
         precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
+        if Lang.staticText(for: kind) != nil {
+            throw GreenTreeBuilderError.staticKindRequiresStaticToken(Lang.rawKind(for: kind))
+        }
         var interner = LocalTokenInterner(storage: cacheStorage.interner)
         let id = interner.storeLargeText(text)
         let length = try TextSize(byteCountOf: text)
