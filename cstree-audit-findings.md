@@ -183,9 +183,9 @@ The remaining gap is mostly spec/API shape, not the old implementation gap. The 
 
 cstree's `token_at_offset` (`syntax/node.rs:848`, `utility_types.rs:133`) returns `None | Single(T) | Between(T, T)`. The `Between` case occurs at exact token boundaries (cursor placement at a token gap is the canonical IDE situation). Cambium's `withToken(at:)` returns Optional, losing the disambiguation. No editor consumer can correctly select "the token to the left vs the token to the right of the cursor" without re-implementing the logic. This is a spec-level gap, not an implementation oversight.
 
-### C4. Resolved-in-implementation: separate "static text" from "missing" in `TokenTextStorage` (arch §10.1)
+### C4. Resolved: separate "static text" from "missing" in `TokenTextStorage` (arch §10.1)
 
-Spec listed `staticText | interned(TokenKey) | ownedLargeText(LargeTokenTextID)` and conflated "missing" with `.staticText + length 0`, which produced bug A5. The implementation now adds a distinct `case missing` to `TokenTextStorage`. The architecture doc §10.1 should be updated to describe the four-case storage model.
+Spec previously listed `staticText | interned(TokenKey) | ownedLargeText(LargeTokenTextID)` and conflated "missing" with `.staticText + length 0`, which produced bug A5. The implementation now adds a distinct `case missing` to `TokenTextStorage` and enforces the zero-length invariant at construction time. Architecture doc §10.1 has been updated to describe the four-case storage model and the per-variant rendering/length contracts; §8.2 cross-references §10.1 for the missing-token storage representation.
 
 ### C5. Resolved in implementation: the spec said `node.kind`, `node.textRange`, `token.text` "must not actor-hop" but never said "must not lock"
 

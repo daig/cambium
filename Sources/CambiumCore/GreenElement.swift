@@ -172,6 +172,7 @@ final class GreenTokenStorage<Lang: SyntaxLanguage> {
     let structuralHash: UInt64
 
     init(rawKind: RawSyntaxKind, textLength: TextSize, text: TokenTextStorage) {
+        precondition(text != .missing || textLength == .zero, "Missing tokens must have zero text length")
         self.rawKind = rawKind
         self.textLength = textLength
         self.text = text

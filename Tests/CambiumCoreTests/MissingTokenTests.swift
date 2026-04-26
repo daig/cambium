@@ -19,6 +19,13 @@ import Testing
 
     let rootLength = tree.withRoot { $0.textRange.length }
     #expect(rootLength == .zero)
+
+    guard case .token(let token) = tree.rootGreen.child(at: 0) else {
+        Issue.record("Expected missing token at child index 0")
+        return
+    }
+    #expect(token.textLength == .zero)
+    #expect(token.textStorage == .missing)
 }
 
 @Test func missingAndStaticTokensOfSameKindAreDistinguishable() throws {
@@ -61,23 +68,13 @@ import Testing
     #expect(originalText == "xy")
     #expect(decodedText == "xy")
 
-    // The middle token is the missing one — verify it's still .missing
-    // after the round trip rather than being silently re-encoded as
-    // .staticText (which would also render "" but for the wrong reason).
-    let probedKindAndLength: (RawSyntaxKind, TextSize)? = decoded.withRoot { root in
-        root.withChildOrToken(at: 1) { element in
-            switch element {
-            case .token(let token):
-                return (token.rawKind, token.textRange.length)
-            case .node:
-                return nil
-            }
-        } ?? nil
-    }
-    guard let (kind, length) = probedKindAndLength else {
+    // The middle token is the missing one — verify the storage round-trips as
+    // .missing, not merely as some other zero-length token representation.
+    guard case .token(let token) = decoded.rootGreen.child(at: 1) else {
         Issue.record("Expected token at child index 1")
         return
     }
-    #expect(kind == RawSyntaxKind(TestKind.plus.rawValue))
-    #expect(length == .zero)
+    #expect(token.rawKind == RawSyntaxKind(TestKind.plus.rawValue))
+    #expect(token.textLength == .zero)
+    #expect(token.textStorage == .missing)
 }

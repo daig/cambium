@@ -486,6 +486,14 @@ Recommended invariants:
 - missing syntax participates in tree shape but not text rendering;
 - error nodes participate in text rendering and range queries.
 
+Missing tokens are represented at storage level by the `.missing` variant of
+`TokenTextStorage` (see §10.1), which is distinct from `.staticText`. This
+distinction matters when a missing token's kind has static text (e.g. an
+expected `+` that the source omitted) — the token must render empty, not
+render the static text. Implementations should enforce the zero-length
+invariant at construction time so that a `.missing` token cannot be
+constructed with a nonzero length.
+
 ---
 
 ## 9. Text model
@@ -531,10 +539,29 @@ Token text should be one of:
 ```swift
 public enum TokenTextStorage: Sendable, Hashable {
     case staticText
+    case missing
     case interned(TokenKey)
     case ownedLargeText(LargeTokenTextID) // optional, policy-controlled
 }
 ```
+
+Each variant has a distinct rendering and length contract:
+
+- **`.staticText`** — the token renders the kind's static text from
+  `Lang.staticText(for: kind)`. Token length must equal that text's UTF-8
+  byte length.
+- **`.missing`** — the token is an absent placeholder for error recovery
+  (the parser expected this kind but the source did not contain it). The
+  token always renders as empty regardless of whether the kind has static
+  text. Token length must be zero. This is a separate variant from
+  `.staticText` so that a missing-token of a static-text kind (e.g. an
+  expected `+` that the source omitted) does *not* render the static text;
+  conflating the two produces trees whose aggregate `textLength` does not
+  match their rendered text.
+- **`.interned(TokenKey)`** — dynamic token text stored in an interner;
+  the resolver maps the key back to bytes/`String`.
+- **`.ownedLargeText(LargeTokenTextID)`** — an optional, policy-controlled
+  escape hatch for tokens whose text is too large to intern profitably.
 
 Static tokens are provided by the language:
 
@@ -553,6 +580,11 @@ public struct TokenKey: RawRepresentable, Hashable, Sendable {
 `TokenKey.rawValue` is resolver/interner-local. It is meaningful only with the
 resolver that produced the tree or build result, and must not be treated as a
 durable serialized identity.
+
+The structural hash mixes a different per-variant tag value for each case
+above so that, for example, `(.plus, length 0, .staticText)` (which would
+be invalid — `.plus` has nonzero static text) and `(.plus, length 0, .missing)`
+(the legal absent placeholder) are not collapsed by the green node cache.
 
 ### 10.2 Resolver/interner split
 
