@@ -1,6 +1,6 @@
 # Cambium ⇄ Rust `cstree` audit
 
-Cambium implements the green/red separation, builder, interner, anchors, and replacement faithfully. After the red cursor read refactor and the green child-offset pass, the biggest remaining divergences are cold red-realization contention/proof gaps and a handful of subtle bugs in code paths the test suite does not exercise. Below, "**arch**" is `swift-native-cst-architecture.md`, line numbers pin the original.
+Cambium implements the green/red separation, builder, interner, witness-based cross-tree identity, and replacement faithfully. After the red cursor read refactor, the green child-offset pass, and the anchor-to-witness redesign, the biggest remaining divergences are cold red-realization contention/proof gaps and a handful of subtle bugs in code paths the test suite does not exercise. Below, "**arch**" is `swift-native-cst-architecture.md`, line numbers pin the original.
 
 Status update: A1/B1/B6 are now resolved by the lock-free red cursor read
 refactor. A2/A3 are now resolved by cached node-child counts and running
@@ -73,15 +73,11 @@ O(N) indexed node-child search.
 **Implemented fix:** cache `nodeChildCount` in `GreenNodeHeader` (it never
 changes after construction).
 
-### A4. `ReuseOracle` always reports `hitBytes = 0`
+### A4. Resolved: `ReuseOracle` always reports `hitBytes = 0`
 
-**Where:** `Sources/CambiumIncremental/IncrementalParsing.swift:139`:
+**Where:** `Sources/CambiumIncremental/IncrementalParsing.swift:139` (historical).
 
-```swift
-session?.recordReuseQuery(hitBytes: result == nil ? nil : TextSize.zero)
-```
-
-`IncrementalParseCounters.reusedBytes` is therefore always zero on any tree — silently breaking benchmarks, telemetry, and cache-tuning. Roadmap Priority 4 lists "Track reused bytes accurately" as future work; it is in fact present-day broken accounting. The `firstReusableNode` callback already has the matched cursor in hand; `cursor.textLength` is the value that should flow back.
+Previously the oracle passed `TextSize.zero` to `recordReuseQuery(hitBytes:)`, leaving `IncrementalParseCounters.reusedBytes` permanently zero. Resolved by changing the private `firstReusableNode` helper to return `(R, TextSize)?` where the `TextSize` is the matched node's length, and threading that real length through to the counter. The semantics of `reusedBytes` now reflect *oracle offers*, not *parser acceptance* — the parser-driven accepted-reuse log (`recordAcceptedReuse` / `consumeAcceptedReuses`) is the authoritative count for what was actually reused.
 
 ### A5. `missingToken(_:)` of a kind with static text renders as the static text
 
@@ -108,11 +104,11 @@ The borrowed subtree's `TokenKey`s point into *its* tree's interner. Appending t
 
 It is correct only when the builder shares the source tree's resolver verbatim (e.g. inside one `IncrementalParseSession`). The API doesn't enforce that.
 
-### A7. Anchor "nearby" resolution is hard-capped at 64 bytes
+### A7. Resolved-by-removal: Anchor "nearby" resolution was hard-capped at 64 bytes
 
-**Where:** `SyntaxTree.swift:1278`. Magic constant, not configurable, not documented. Any edit that moves a node by > 64 bytes (paste, large refactor, reformat) silently fails to resolve a previously-valid anchor. Anchors are explicitly designed to survive edits — this implementation makes them fragile in exactly the cases where you want them most.
+**Where:** historical `SyntaxTree.swift` `nearbyNode` helper.
 
-**Fix sketch:** parameterise the tolerance on `SharedSyntaxTree.resolve(_:_:)` and document the trade-off; or compute a tolerance from the anchor's `range.length`.
+The four-step anchor-resolution ladder relied on a hardcoded 64-byte tolerance for its final fallback. Resolved by replacing the entire `SyntaxAnchor` / `SharedSyntaxTree.resolve(_:_:)` mechanism with a witness-based design: edits return `ReplacementWitness` and incremental parses return `ParseWitness`, both pure structural descriptions of what changed. Cross-tree identity tracking is now externalized — there is no in-library "find this node again by fingerprint" path, so no magic-number tolerance. See `WITNESS.md` for the design.
 
 ### A8. `SharedTokenInterner` shard encoding silently overflows after 16 M tokens per shard
 
@@ -234,7 +230,7 @@ Spec §25.4 prescribes "maximum bytes; maximum entries; eviction strategy; instr
 - **Wide-node traversal coverage is now present.** A focused mixed node/token
   test covers the A2/A3 offset and node-count regression surface.
 - **No SharedTokenInterner stress tests.** A8 / A9 invisible.
-- **No anchor-after-edit tests with delta > 64 bytes.** A7 invisible.
+- **A7 is gone**: anchors no longer exist; `WitnessTests.swift` covers the witness-based replacement contract that replaces them.
 - **No `builder.token(.plus, text: "X")` test.** D3 invisible.
 - **No `walkPreorderWithTokens` skip/stop test.** Test uses skip on node-only walk only.
 
@@ -243,9 +239,9 @@ Spec §25.4 prescribes "maximum bytes; maximum entries; eviction strategy; instr
 ## Recommended priority
 
 1. **A5, A6, A8, A9** — silent correctness bugs that will eventually bite real users.
-2. **A4, A7, A10** — operational gaps that limit incremental parsing usefulness.
+2. **A10** — operational gap that limits incremental parsing usefulness. (A4 fixed; A7 removed by witness redesign.)
 3. **B4** — benchmark repeated random lookups on wide nodes before adding an offset table.
 4. **C-series spec fixes** — update arch doc to make `TokenAtOffset.Between`, `missing`-as-distinct-storage, and lock-free read goals explicit, so future contributors don't re-derive the wrong constraints.
 5. **D-series and roadmap** — most of D maps onto roadmap priorities 2/3; D1, D2, D3 should be added.
 
-Cambium's *shape* matches the architecture spec well — green/red split, noncopyable builder, anchors, replacement, serialization, macro-derived kinds. Where it still diverges is mostly invisible from happy-path tests (A5, A6) and stress limits (A8, A9). A focused pass on the remaining silent correctness bugs would close the largest gaps with the spec without re-architecting.
+Cambium's *shape* matches the architecture spec well — green/red split, noncopyable builder, witness-based cross-tree identity, replacement, serialization, macro-derived kinds. Where it still diverges is mostly invisible from happy-path tests (A5, A6) and stress limits (A8, A9). A focused pass on the remaining silent correctness bugs would close the largest gaps with the spec without re-architecting.

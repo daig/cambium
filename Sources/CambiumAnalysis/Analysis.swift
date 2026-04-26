@@ -11,18 +11,15 @@ public struct Diagnostic<Lang: SyntaxLanguage>: Sendable, Hashable {
     public var range: TextRange
     public var message: String
     public var severity: DiagnosticSeverity
-    public var anchor: SyntaxAnchor<Lang>?
 
     public init(
         range: TextRange,
         message: String,
-        severity: DiagnosticSeverity = .error,
-        anchor: SyntaxAnchor<Lang>? = nil
+        severity: DiagnosticSeverity = .error
     ) {
         self.range = range
         self.message = message
         self.severity = severity
-        self.anchor = anchor
     }
 }
 
@@ -93,13 +90,11 @@ public final class SyntaxMetadataStore<Lang: SyntaxLanguage>: @unchecked Sendabl
 }
 
 public struct AnalysisCacheKey<Lang: SyntaxLanguage>: Sendable, Hashable {
-    public let treeID: TreeID
-    public let anchor: SyntaxAnchor<Lang>
+    public let identity: SyntaxNodeIdentity
     public let namespace: String
 
-    public init(treeID: TreeID, anchor: SyntaxAnchor<Lang>, namespace: String) {
-        self.treeID = treeID
-        self.anchor = anchor
+    public init(identity: SyntaxNodeIdentity, namespace: String) {
+        self.identity = identity
         self.namespace = namespace
     }
 }
@@ -119,7 +114,7 @@ public final class ExternalAnalysisCache<Lang: SyntaxLanguage, Value: Sendable>:
 
     public func removeValues(notMatching treeID: TreeID) {
         storage.withLock { values in
-            values = values.filter { $0.key.treeID == treeID }
+            values = values.filter { $0.key.identity.treeID == treeID }
         }
     }
 }

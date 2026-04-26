@@ -159,9 +159,9 @@ A borrowed cursor is a noncopyable, non-owning view of a red node or token withi
 
 A handle is a copyable, owned reference to a node/token/tree. It strongly retains the underlying tree storage. Handles are useful for storage, cross-task work, SwiftUI snapshots, diagnostics, and caches. They are intentionally not the default traversal representation.
 
-### Anchor
+### Witness
 
-An anchor is a storage-free, cross-version reference hint. It contains path/range/kind/hash information and can be resolved against a later tree version. Anchors are for diagnostics, selections, folding, indexing, and semantic caches.
+A witness is a pure structural description of an edit or incremental reparse, returned alongside the new tree. Cross-tree identity tracking is *not* a core concern; consumers translate v0 references to v1 by inspecting the witness, and compose their own identity tables outside the library. See `WITNESS.md` for the full design and `ReplacementWitness` / `ParseWitness` for the concrete types.
 
 ---
 
@@ -199,7 +199,7 @@ CSTBuilder
 
 CSTIncremental
   ReuseOracle
-  SyntaxAnchor
+  ParseWitness
   edit/range mapping
   incremental parse session infrastructure
 
@@ -322,7 +322,6 @@ extension SyntaxTree {
 
 extension SyntaxNodeCursor {
     public borrowing func makeHandle() -> SyntaxNodeHandle<Lang>
-    public borrowing func makeAnchor() -> SyntaxAnchor<Lang>
 }
 ```
 
@@ -873,7 +872,7 @@ node identity = (treeID, redNodeID)
 token identity = (treeID, parentRedNodeID, childIndexInParent)
 ```
 
-Across trees, use anchors, not node identity.
+Across trees, node identity is not preserved by the library. Cross-tree identity tracking is externalized — consumers translate v0 references to v1 by inspecting witnesses returned from `replacing(...)` and incremental reparses (see `WITNESS.md`).
 
 ---
 
@@ -978,7 +977,6 @@ Explicit ownership conversions:
 ```swift
 extension SyntaxNodeCursor {
     public borrowing func makeHandle() -> SyntaxNodeHandle<Lang>
-    public borrowing func makeAnchor() -> SyntaxAnchor<Lang>
 }
 ```
 
@@ -1087,7 +1085,7 @@ Rules:
 - never build arrays of handles in core traversal APIs;
 - provide handle collections only in a convenience module;
 - document that handles retain tree storage;
-- prefer anchors for cross-version persistence.
+- handles are tree-scoped; for cross-version translation, drive an external identity tracker with witnesses (see `WITNESS.md`).
 
 ---
 
@@ -1178,49 +1176,37 @@ replacement.withText { newText in ... }
 
 ---
 
-## 18. Stable anchors across tree versions
+## 18. Cross-tree identity via witnesses
 
-Node handles are stable only within one tree version. They should not be used as cross-version identity.
+Node handles are stable only within one tree version. They are not cross-version identity.
 
-Use anchors:
+Cross-tree identity tracking is *externalized*: edit-producing operations (`replacing(handle:...)` and incremental reparses) return a **witness** alongside the new tree. The witness is a pure structural description of what changed; consumers translate v0 references to v1 by inspecting it. Cambium does not impose a tracker, deletion policy, or fingerprint heuristic.
+
+The two witness types:
 
 ```swift
-public struct SyntaxAnchor<Lang: SyntaxLanguage>: Sendable, Hashable {
-    public let originalTreeID: TreeID
-    public let path: SmallPath       // child indices from root
-    public let range: TextRange
-    public let rawKind: RawSyntaxKind
-    public let greenHash: UInt64
+public struct ReplacementWitness<Lang: SyntaxLanguage>: Sendable {
+    public let oldRoot: GreenNode<Lang>
+    public let newRoot: GreenNode<Lang>
+    public let replacedPath: SyntaxNodePath
+    public let oldSubtree: GreenNode<Lang>
+    public let newSubtree: GreenNode<Lang>
+    public func classify(path: SyntaxNodePath) -> ReplacementOutcome<Lang>
+}
+
+public struct ParseWitness<Lang: SyntaxLanguage>: Sendable {
+    public let oldRoot: GreenNode<Lang>?
+    public let newRoot: GreenNode<Lang>
+    public let reusedSubtrees: [Reuse<Lang>]
+    public let invalidatedRegions: [TextRange]
 }
 ```
 
-Resolution:
+Witnesses use `GreenNodeIdentity` (`node.identity`) as the cross-tree "same node" relation: because the cache deduplicates green storage, structurally preserved subtrees keep the same `GreenNode` instance across versions. This makes "preserved" a deterministic identity-equality check rather than a fingerprint-match heuristic.
 
-```swift
-extension SharedSyntaxTree {
-    public func resolve<R>(
-        _ anchor: SyntaxAnchor<Lang>,
-        _ body: (borrowing SyntaxNodeCursor<Lang>) throws -> R
-    ) rethrows -> R?
-}
-```
+Use witnesses for: diagnostics, selections, code actions, folding ranges, semantic caches, syntax-highlight invalidation, symbol-index references — all of which previously required fingerprint-based anchors, now drive an external identity tracker by feeding it witnesses on each edit.
 
-Resolution strategy:
-
-1. exact path if still valid and kind/hash match;
-2. same range and kind;
-3. nearby range with matching hash;
-4. language-specific fallback if provided.
-
-Use anchors for:
-
-- diagnostics;
-- selections;
-- code actions;
-- folding ranges;
-- semantic caches;
-- syntax-highlight invalidation;
-- symbol-index references.
+See `WITNESS.md` for the full design rationale, classification rules, and the integrator pattern for `ParseWitness` (parser-driven `IncrementalParseSession.recordAcceptedReuse` / `consumeAcceptedReuses`).
 
 ---
 
@@ -1350,7 +1336,7 @@ snapshot.tree.withRoot { root in
 }
 ```
 
-The UI should store anchors or ranges, not node cursors. Cursors are borrow-scoped and should not escape.
+The UI should store handles or ranges, not node cursors. Cursors are borrow-scoped and should not escape. To follow a reference across tree versions, drive an external identity tracker with witnesses returned from edits.
 
 ---
 
@@ -1468,7 +1454,7 @@ final class NodeMetadata: @unchecked Sendable {
 }
 ```
 
-This has runtime lookup and locking overhead. It is useful for memoized local syntax facts, but large semantic systems should use external caches keyed by `SyntaxAnchor`, `TreeID`, or explicit node handles.
+This has runtime lookup and locking overhead. It is useful for memoized local syntax facts, but large semantic systems should use external caches keyed by `SyntaxNodeIdentity`, `TreeID`, or explicit node handles, with cross-tree migration driven by witnesses.
 
 ---
 
@@ -1681,8 +1667,7 @@ snapshot.tree.withRoot { root in
     root.withCoveringElement(errorRange) { element in
         switch element {
         case .node(let node):
-            let anchor = node.makeAnchor()
-            diagnostics.append(Diagnostic(anchor: anchor, message: message))
+            diagnostics.append(Diagnostic(range: node.textRange, message: message))
         case .token(let token):
             diagnostics.append(Diagnostic(range: token.textRange, message: message))
         }
@@ -1762,20 +1747,20 @@ Exit criteria:
 - cold/warm traversal benchmarks;
 - Thread Sanitizer concurrent traversal tests.
 
-### Phase 4: Replacement and anchors
+### Phase 4: Replacement and witnesses
 
 Deliver:
 
 - green replacement;
 - tree replacement;
-- `SyntaxAnchor` creation/resolution;
+- `ReplacementWitness` returned from `replacing(handle:...)`;
 - text edit integration.
 
 Exit criteria:
 
 - ancestor-path-only replacement tests;
 - old tree remains valid;
-- anchor resolution across edits.
+- witness `classify(path:)` returns the right outcome for preservation, ancestor, replacedRoot, and deletion paths.
 
 ### Phase 5: Incremental support
 
@@ -1837,7 +1822,7 @@ Required test categories:
 - Use borrowed cursors for traversal.
 - Use `with...` APIs to create scoped borrows.
 - Use `makeHandle()` only when a node/token must outlive the borrow scope.
-- Use anchors for cross-version identity.
+- Drive an external identity tracker with witnesses for cross-version reference translation.
 - Use `SyntaxText.writeUTF8` for text rendering.
 - Keep builder/cache/interner state noncopyable.
 - Keep red records arena-owned.
@@ -1914,12 +1899,13 @@ Copyable SharedSyntaxTree
 Noncopyable SyntaxNodeCursor / SyntaxTokenCursor
     primary traversal path
     no implicit storage retain
-    ↓ explicit makeHandle/makeAnchor
+    ↓ explicit makeHandle
 Copyable SyntaxNodeHandle / SyntaxTokenHandle
     long-lived same-tree references
-    ↓ cross-version persistence
-SyntaxAnchor
-    storage-free resolution hint
+    ↓ edit / incremental reparse
+ReplacementWitness / ParseWitness
+    pure structural change descriptions
+    consumed by external identity trackers
 ```
 
 Green tree construction is likewise ownership-aware:

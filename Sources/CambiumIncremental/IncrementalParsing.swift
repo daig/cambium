@@ -89,8 +89,18 @@ public struct IncrementalParseCounters: Sendable, Hashable {
     }
 }
 
+/// State kept across the lifetime of an incremental parser. Holds offer-side
+/// counters (what the `ReuseOracle` was asked about) and an accepted-reuse
+/// log (what the parser/builder actually carried over).
+///
+/// Concurrency contract: a single `IncrementalParseSession` is safe for
+/// **one active parse at a time**. Counters and the accepted-reuse log are
+/// session-global; concurrent parses against the same session interleave
+/// their data, and `consumeAcceptedReuses()` returns an indeterminate mix.
+/// Use one session per parse if you parse concurrently.
 public final class IncrementalParseSession<Lang: SyntaxLanguage>: @unchecked Sendable {
     private let countersStorage = Mutex(IncrementalParseCounters())
+    private let acceptedReusesStorage = Mutex<[Reuse<Lang>]>([])
 
     public init() {}
 
@@ -98,6 +108,12 @@ public final class IncrementalParseSession<Lang: SyntaxLanguage>: @unchecked Sen
         countersStorage.withLock { $0 }
     }
 
+    /// Record an oracle offer. `hitBytes` is the matched node's text length
+    /// when the oracle returned a candidate, or `nil` when no match was
+    /// found. Note that an offer is not the same as an accepted reuse —
+    /// the parser may inspect a candidate and decline. Counters reflect
+    /// offers; the accepted-reuse log is updated separately via
+    /// `recordAcceptedReuse(...)`.
     public func recordReuseQuery(hitBytes: TextSize?) {
         countersStorage.withLock { counters in
             counters.reuseQueries += 1
@@ -105,6 +121,32 @@ public final class IncrementalParseSession<Lang: SyntaxLanguage>: @unchecked Sen
                 counters.reuseHits += 1
                 counters.reusedBytes += UInt64(hitBytes.rawValue)
             }
+        }
+    }
+
+    /// Record that the parser/builder accepted a reused subtree from the
+    /// previous tree at `oldPath` and spliced it into the new tree at
+    /// `newPath`. The integrator drains this log via
+    /// `consumeAcceptedReuses()` to populate `ParseWitness.reusedSubtrees`.
+    public func recordAcceptedReuse(
+        oldPath: SyntaxNodePath,
+        newPath: SyntaxNodePath,
+        green: GreenNode<Lang>
+    ) {
+        acceptedReusesStorage.withLock { log in
+            log.append(Reuse(green: green, oldPath: oldPath, newPath: newPath))
+        }
+    }
+
+    /// Drain the accepted-reuse log atomically. Call after a parse
+    /// completes to gather the reuses for `ParseWitness` construction. A
+    /// subsequent call before another parse records reuses returns an
+    /// empty array — the log does not accumulate across parses.
+    public func consumeAcceptedReuses() -> [Reuse<Lang>] {
+        acceptedReusesStorage.withLock { log in
+            let drained = log
+            log.removeAll(keepingCapacity: true)
+            return drained
         }
     }
 
@@ -133,11 +175,11 @@ public struct ReuseOracle<Lang: SyntaxLanguage>: ~Copyable {
         }
 
         let rawKind = Lang.rawKind(for: kind)
-        let result = try previousTree.withRoot { root in
+        let outcome = try previousTree.withRoot { root in
             try root.firstReusableNode(startingAt: offset, rawKind: rawKind, body)
         }
-        session?.recordReuseQuery(hitBytes: result == nil ? nil : TextSize.zero)
-        return result
+        session?.recordReuseQuery(hitBytes: outcome?.hitBytes)
+        return outcome?.value
     }
 }
 
@@ -146,12 +188,13 @@ private extension SyntaxNodeCursor {
         startingAt offset: TextSize,
         rawKind: RawSyntaxKind,
         _ body: (borrowing SyntaxNodeCursor<Lang>) throws -> R
-    ) rethrows -> R? {
+    ) rethrows -> (value: R, hitBytes: TextSize)? {
         if textRange.start == offset && self.rawKind == rawKind {
-            return try body(self)
+            let length = textRange.length
+            return (try body(self), length)
         }
 
-        var result: R?
+        var result: (value: R, hitBytes: TextSize)?
         try forEachChild { child in
             if result == nil, child.textRange.start <= offset, offset <= child.textRange.end {
                 result = try child.firstReusableNode(startingAt: offset, rawKind: rawKind, body)

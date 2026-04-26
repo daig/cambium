@@ -55,28 +55,6 @@ public struct SyntaxTokenIdentity: Sendable, Hashable {
     }
 }
 
-public struct SyntaxAnchor<Lang: SyntaxLanguage>: Sendable, Hashable {
-    public let originalTreeID: TreeID
-    public let path: [UInt32]
-    public let range: TextRange
-    public let rawKind: RawSyntaxKind
-    public let greenHash: UInt64
-
-    public init(
-        originalTreeID: TreeID,
-        path: [UInt32],
-        range: TextRange,
-        rawKind: RawSyntaxKind,
-        greenHash: UInt64
-    ) {
-        self.originalTreeID = originalTreeID
-        self.path = path
-        self.range = range
-        self.rawKind = rawKind
-        self.greenHash = greenHash
-    }
-}
-
 final class RedNodeRecord<Lang: SyntaxLanguage>: @unchecked Sendable {
     let id: RedNodeID
     let green: GreenNode<Lang>
@@ -336,27 +314,6 @@ public struct SharedSyntaxTree<Lang: SyntaxLanguage>: Sendable {
         SyntaxNodeHandle(storage: storage, record: storage.arena.rootRecord)
     }
 
-    public func resolve<R>(
-        _ anchor: SyntaxAnchor<Lang>,
-        _ body: (borrowing SyntaxNodeCursor<Lang>) throws -> R
-    ) rethrows -> R? {
-        if let exact = try withRoot({ root in
-            try root.withDescendant(atPath: anchor.path) { candidate in
-                candidate.rawKind == anchor.rawKind
-                    && candidate.greenHash == anchor.greenHash
-                    ? try body(candidate)
-                    : nil
-            }
-        }) {
-            return exact
-        }
-
-        return try withRoot { root in
-            try root.firstNode(range: anchor.range, rawKind: anchor.rawKind, greenHash: anchor.greenHash, body)
-                ?? root.firstNode(range: anchor.range, rawKind: anchor.rawKind, greenHash: nil, body)
-                ?? root.nearbyNode(range: anchor.range, rawKind: anchor.rawKind, greenHash: anchor.greenHash, body)
-        }
-    }
 }
 
 public struct SyntaxNodeHandle<Lang: SyntaxLanguage>: Sendable, Hashable {
@@ -1485,16 +1442,6 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
         SyntaxNodeHandle(storage: storage, record: record)
     }
 
-    public borrowing func makeAnchor() -> SyntaxAnchor<Lang> {
-        SyntaxAnchor(
-            originalTreeID: storage.treeID,
-            path: childIndexPath(),
-            range: textRange,
-            rawKind: rawKind,
-            greenHash: greenHash
-        )
-    }
-
     public borrowing func childIndexPath() -> [UInt32] {
         var path: [UInt32] = []
         var current = record
@@ -1526,46 +1473,6 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
         return try body(cursor)
     }
 
-    internal borrowing func firstNode<R>(
-        range: TextRange,
-        rawKind: RawSyntaxKind,
-        greenHash: UInt64?,
-        _ body: (borrowing SyntaxNodeCursor<Lang>) throws -> R
-    ) rethrows -> R? {
-        if textRange == range && self.rawKind == rawKind && (greenHash == nil || self.greenHash == greenHash) {
-            return try body(self)
-        }
-        var result: R?
-        try forEachChild { child in
-            if result == nil {
-                result = try child.firstNode(range: range, rawKind: rawKind, greenHash: greenHash, body)
-            }
-        }
-        return result
-    }
-
-    internal borrowing func nearbyNode<R>(
-        range: TextRange,
-        rawKind: RawSyntaxKind,
-        greenHash: UInt64,
-        _ body: (borrowing SyntaxNodeCursor<Lang>) throws -> R
-    ) rethrows -> R? {
-        if rawKind == self.rawKind && greenHash == self.greenHash {
-            let delta = textRange.start.rawValue > range.start.rawValue
-                ? textRange.start.rawValue - range.start.rawValue
-                : range.start.rawValue - textRange.start.rawValue
-            if delta <= 64 {
-                return try body(self)
-            }
-        }
-        var result: R?
-        try forEachChild { child in
-            if result == nil {
-                result = try child.nearbyNode(range: range, rawKind: rawKind, greenHash: greenHash, body)
-            }
-        }
-        return result
-    }
 }
 
 public struct SyntaxTokenCursor<Lang: SyntaxLanguage>: ~Copyable {

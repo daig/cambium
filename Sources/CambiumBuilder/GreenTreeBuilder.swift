@@ -653,26 +653,68 @@ private func rebuildReplacing<Lang: SyntaxLanguage>(
 }
 
 public extension SharedSyntaxTree {
+    /// Replace the subtree at `handle` with `replacement`, producing a new
+    /// `SyntaxTree` and a `ReplacementWitness` that describes the structural
+    /// change. The witness carries enough information for an external
+    /// identity tracker to translate any v0 reference into v1.
+    ///
+    /// `handle` must be from this tree; passing a handle from a different
+    /// tree traps. (Cross-tree replacement is not a meaningful operation —
+    /// translate the handle through your own tracker first.)
     func replacing(
-        _ anchor: SyntaxAnchor<Lang>,
+        _ handle: SyntaxNodeHandle<Lang>,
         with replacement: GreenNode<Lang>,
         cache: inout GreenNodeCache<Lang>
-    ) throws -> SyntaxTree<Lang>? {
-        var newRoot: GreenNode<Lang>?
-        try resolve(anchor) { node in
-            newRoot = try node.replacingSelf(with: replacement, using: &cache)
+    ) throws -> ReplacementResult<Lang> {
+        precondition(
+            handle.identity.treeID == treeID,
+            "SyntaxNodeHandle is from a different tree than the SharedSyntaxTree it is being applied to"
+        )
+        let oldRoot = rootGreen
+        let (replacedPath, oldSubtree): (SyntaxNodePath, GreenNode<Lang>) = handle.withCursor { cursor in
+            let path = cursor.childIndexPath()
+            let oldSub = cursor.green { $0 }
+            return (path, oldSub)
         }
-        guard let newRoot else {
-            return nil
+        let newRoot: GreenNode<Lang>
+        if oldSubtree.identity == replacement.identity {
+            newRoot = oldRoot
+        } else {
+            newRoot = try rebuildReplacing(
+                root: oldRoot,
+                path: ArraySlice(replacedPath),
+                replacement: replacement,
+                cache: &cache
+            )
         }
-        return SyntaxTree(root: newRoot, resolver: resolver)
+        let witness = ReplacementWitness(
+            oldRoot: oldRoot,
+            newRoot: newRoot,
+            replacedPath: replacedPath,
+            oldSubtree: oldSubtree,
+            newSubtree: replacement
+        )
+        return ReplacementResult(
+            tree: SyntaxTree(root: newRoot, resolver: resolver),
+            witness: witness
+        )
     }
 
+    /// Same as `replacing(_:with:cache:)` for `GreenNode`, but accepts a
+    /// `GreenBuildResult` produced by an independent `GreenTreeBuilder`.
+    /// Token interner keys in the replacement are remapped through `cache`
+    /// so the returned tree's resolver can resolve them; the witness's
+    /// `newSubtree` is the remapped subtree (which is what actually lives
+    /// in the new tree).
     func replacing(
-        _ anchor: SyntaxAnchor<Lang>,
+        _ handle: SyntaxNodeHandle<Lang>,
         with replacement: GreenBuildResult<Lang>,
         cache: inout GreenNodeCache<Lang>
-    ) throws -> SyntaxTree<Lang>? {
+    ) throws -> ReplacementResult<Lang> {
+        precondition(
+            handle.identity.treeID == treeID,
+            "SyntaxNodeHandle is from a different tree than the SharedSyntaxTree it is being applied to"
+        )
         var remapper = ReplacementTokenRemapper<Lang>()
         let remappedReplacement = try remapper.remap(
             node: replacement.root,
@@ -680,18 +722,47 @@ public extension SharedSyntaxTree {
             cache: &cache
         )
 
-        var newRoot: GreenNode<Lang>?
-        try resolve(anchor) { node in
-            newRoot = try node.replacingSelf(with: remappedReplacement, using: &cache)
+        let oldRoot = rootGreen
+        let (replacedPath, oldSubtree): (SyntaxNodePath, GreenNode<Lang>) = handle.withCursor { cursor in
+            let path = cursor.childIndexPath()
+            let oldSub = cursor.green { $0 }
+            return (path, oldSub)
         }
-        guard let newRoot else {
-            return nil
+        if oldSubtree.identity == remappedReplacement.identity {
+            let witness = ReplacementWitness(
+                oldRoot: oldRoot,
+                newRoot: oldRoot,
+                replacedPath: replacedPath,
+                oldSubtree: oldSubtree,
+                newSubtree: remappedReplacement
+            )
+            return ReplacementResult(
+                tree: SyntaxTree(root: oldRoot, resolver: resolver),
+                witness: witness
+            )
         }
+
+        let newRoot = try rebuildReplacing(
+            root: oldRoot,
+            path: ArraySlice(replacedPath),
+            replacement: remappedReplacement,
+            cache: &cache
+        )
         let overlay = OverlayTokenResolver(
             base: resolver,
             interned: remapper.interned,
             large: remapper.large
         )
-        return SyntaxTree(root: newRoot, resolver: overlay)
+        let witness = ReplacementWitness(
+            oldRoot: oldRoot,
+            newRoot: newRoot,
+            replacedPath: replacedPath,
+            oldSubtree: oldSubtree,
+            newSubtree: remappedReplacement
+        )
+        return ReplacementResult(
+            tree: SyntaxTree(root: newRoot, resolver: overlay),
+            witness: witness
+        )
     }
 }

@@ -7,61 +7,6 @@ import CambiumOwnedTraversal
 import CambiumSerialization
 import Testing
 
-private enum TestKind: UInt32, Sendable {
-    case root = 1
-    case list = 2
-    case identifier = 3
-    case plus = 4
-    case whitespace = 5
-    case missing = 6
-    case error = 7
-}
-
-private enum TestLanguage: SyntaxLanguage {
-    typealias Kind = TestKind
-
-    static let rootKind: TestKind = .root
-    static let missingKind: TestKind = .missing
-    static let errorKind: TestKind = .error
-    static let serializationID = "org.cambium.tests.test-language"
-    static let serializationVersion: UInt32 = 1
-
-    static func rawKind(for kind: TestKind) -> RawSyntaxKind {
-        RawSyntaxKind(kind.rawValue)
-    }
-
-    static func kind(for raw: RawSyntaxKind) -> TestKind {
-        TestKind(rawValue: raw.rawValue) ?? .error
-    }
-
-    static func staticText(for kind: TestKind) -> StaticString? {
-        switch kind {
-        case .plus:
-            "+"
-        case .whitespace:
-            " "
-        default:
-            nil
-        }
-    }
-
-    static func isTrivia(_ kind: TestKind) -> Bool {
-        kind == .whitespace
-    }
-
-    static func isNode(_ kind: TestKind) -> Bool {
-        kind == .root || kind == .list || kind == .error || kind == .missing
-    }
-
-    static func isToken(_ kind: TestKind) -> Bool {
-        !isNode(kind)
-    }
-
-    static func name(for kind: TestKind) -> String {
-        "\(kind)"
-    }
-}
-
 private enum OtherLanguage: SyntaxLanguage {
     typealias Kind = TestKind
 
@@ -908,7 +853,7 @@ private func describeElementWalkEvent(_ event: borrowing SyntaxElementWalkEvent<
     ])
 }
 
-@Test func anchorsResolveAndReplacementRebuildsAncestorPath() throws {
+@Test func handlesReplaceAndRebuildAncestorPathWithWitness() throws {
     var builder = GreenTreeBuilder<TestLanguage>()
     builder.startNode(.root)
     builder.startNode(.list)
@@ -916,20 +861,16 @@ private func describeElementWalkEvent(_ event: borrowing SyntaxElementWalkEvent<
     try builder.finishNode()
     try builder.finishNode()
 
-    let result = try builder.finish()
-    let tree = result.makeSyntaxTree()
+    let buildResult = try builder.finish()
+    let tree = buildResult.makeSyntaxTree()
     let shared = tree.share()
 
-    let anchor = shared.withRoot { root in
+    let listHandle = shared.withRoot { root in
         root.withChildNode(at: 0) { child in
-            child.makeAnchor()
+            child.makeHandle()
         }!
     }
-
-    let resolvedKind = shared.resolve(anchor) { node in
-        node.kind
-    }
-    #expect(resolvedKind == .list)
+    #expect(listHandle.rawKind == RawSyntaxKind(TestKind.list.rawValue))
 
     var replacementBuilder = GreenTreeBuilder<TestLanguage>()
     replacementBuilder.startNode(.list)
@@ -938,8 +879,11 @@ private func describeElementWalkEvent(_ event: borrowing SyntaxElementWalkEvent<
     let replacement = try replacementBuilder.finish()
 
     var cache = GreenNodeCache<TestLanguage>()
-    let newTree = try shared.replacing(anchor, with: replacement, cache: &cache)
-    let text = newTree?.withRoot { root in
+    let result = try shared.replacing(listHandle, with: replacement, cache: &cache)
+    let witness = result.witness
+    let newTree = result.intoTree()
+
+    let text = newTree.withRoot { root in
         root.makeString()
     }
     #expect(text == "new")
@@ -948,6 +892,14 @@ private func describeElementWalkEvent(_ event: borrowing SyntaxElementWalkEvent<
         root.makeString()
     }
     #expect(oldText == "old")
+
+    #expect(witness.replacedPath == [0])
+    if case .replacedRoot = witness.classify(path: [0]) {} else {
+        Issue.record("Expected .replacedRoot for witness path [0]")
+    }
+    if case .ancestor = witness.classify(path: []) {} else {
+        Issue.record("Expected .ancestor for empty path")
+    }
 }
 
 @Test func incrementalRangeMappingShiftsAndInvalidates() {
@@ -1046,12 +998,12 @@ private enum ListSpec: TypedSyntaxNode {
     try builder.finishNode()
     try builder.finishNode()
 
-    let result = try builder.finish()
-    let tree = result.makeSyntaxTree()
+    let buildResult = try builder.finish()
+    let tree = buildResult.makeSyntaxTree()
     let shared = tree.share()
-    let anchor = shared.withRoot { root in
+    let listHandle = shared.withRoot { root in
         root.withChildNode(at: 0) { child in
-            child.makeAnchor()
+            child.makeHandle()
         }!
     }
 
@@ -1062,7 +1014,8 @@ private enum ListSpec: TypedSyntaxNode {
     let replacement = try replacementBuilder.finish()
 
     var cache = GreenNodeCache<TestLanguage>()
-    let replaced = try shared.replacing(anchor, with: replacement, cache: &cache)!
+    let result = try shared.replacing(listHandle, with: replacement, cache: &cache)
+    let replaced = result.intoTree()
     let bytes = try replaced.serializeGreenSnapshot()
     let decoded = try GreenSnapshotDecoder.decodeTree(bytes, as: TestLanguage.self)
 
