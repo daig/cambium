@@ -1,10 +1,12 @@
 # Cambium ⇄ Rust `cstree` audit
 
-Cambium implements the green/red separation, builder, interner, anchors, and replacement faithfully. The biggest divergences are not where the roadmap currently looks — they are in the red layer's hot path, the green text-offset arithmetic, and a handful of subtle bugs in code paths the test suite does not exercise. Below, "**arch**" is `swift-native-cst-architecture.md`, line numbers pin the original.
+Cambium implements the green/red separation, builder, interner, anchors, and replacement faithfully. After the red cursor read refactor, the biggest remaining divergences are the green text-offset arithmetic, cold red-realization contention/proof gaps, and a handful of subtle bugs in code paths the test suite does not exercise. Below, "**arch**" is `swift-native-cst-architecture.md`, line numbers pin the original.
 
 Status update: A1/B1/B6 are now resolved by the lock-free red cursor read
-refactor. The remaining critical correctness/performance concerns start with
-A2/A3 and the silent correctness bugs in A5/A6/A8/A9.
+refactor. B2 remains open, but is downgraded to a cold-path contention and
+benchmark question rather than a hot-read defect. The remaining critical
+correctness/performance concerns start with A2/A3 and the silent correctness
+bugs in A5/A6/A8/A9.
 
 ---
 
@@ -129,9 +131,13 @@ Spec §13.4 fast path: atomic-acquire load → if non-zero, return. The A1 fix
 restores that contract for realized child reads: the fast path acquire-loads
 the slot before entering the arena mutex.
 
-### B2. No striped or per-parent locks
+### B2. Open but downgraded: cold realization still uses one arena mutex
 
-Spec §13.4: "start with arena-level or striped locks for correctness; benchmark per-parent locks only if contention appears." Cambium has only the single arena mutex, with no path to upgrade. Spec §13.4's "Preferred lock granularity" bullet list isn't reflected in the code.
+Spec §13.4: "start with arena-level or striped locks for correctness; benchmark per-parent locks only if contention appears." Cambium still has one arena-level mutex, but after the A1 fix that mutex is no longer on ordinary cursor property reads or realized-child traversal. `realizeChildNode` now acquire-loads the parent child slot first; if the slot already contains a published record pointer, it returns without locking.
+
+What remains under `RedArena.state.withLock` is the cold path: allocating slot storage for a newly realized child, assigning the next `RedNodeID`, appending the arena-owned `RedNodeRecord`, double-checking the slot under the lock, and release-publishing the record pointer. This is correct and avoids duplicate publication, but independent threads cold-traversing different unrealized subtrees still queue behind the same mutex.
+
+So B2 no longer describes a hot-path design violation. It is an open concurrency/performance proof item: keep the global lock until cold parallel traversal benchmarks, broader stress tests, or Thread Sanitizer runs show that striped or per-parent locks are worth the extra complexity.
 
 ### B3. No per-node-size cache threshold
 
@@ -157,11 +163,13 @@ Spec §14.1's "implementation sketch" explicitly mentions "unowned/unsafe pointe
 
 > Red nodes are `Send`/`Sync` by atomically reference-counting the syntax tree as a whole rather than individual nodes.
 
-cstree does have one shared `*mut AtomicU32` per tree (`syntax/node.rs:261`), but every `SyntaxNode::clone` *still* increments that shared atomic — once per cloned reference. There is also one `Box<NodeData>` allocation per realised red node. Cambium reasonably interpreted the spec as "no per-node ARC at all", and went further: cursors never retain via `Unmanaged.passUnretained`. The handle path is the only one that takes a retain. So the architecture matches the spec's *spirit* — but only if the *reads* are also lock-free, which they aren't (A1). The arch doc didn't connect the two requirements.
+cstree does have one shared `*mut AtomicU32` per tree (`syntax/node.rs:261`), but every `SyntaxNode::clone` *still* increments that shared atomic — once per cloned reference. There is also one `Box<NodeData>` allocation per realised red node. Cambium reasonably interpreted the spec as "no per-node ARC at all", and went further: cursors never retain via `Unmanaged.passUnretained`. The handle path is the only one that takes a retain. The A1 fix now makes cursor reads lock-free as well, so Cambium matches the spec's spirit here; the remaining lesson is that the arch doc should state the lock-free read requirement explicitly instead of only implying it through "predictable copying/sharing."
 
-### C2. The spec under-specified `SyntaxText` (arch §16)
+### C2. Mostly resolved in implementation: the spec under-specified `SyntaxText` (arch §16)
 
-Spec defines `utf8Count`, `writeUTF8(to:)`, `makeString()`. cstree's `SyntaxText` (`syntax/text.rs`) ships `is_empty`, `contains_char`, `find_char`, `char_at`, `slice`, `try_for_each_chunk`, `try_fold_chunks`, equality with `&str`/`String`/other `SyntaxText`. Roadmap Priority 2 acknowledges some of this, but the spec itself never set the bar. The implementation is faithful to the spec — the spec is impoverished.
+The original spec defined only `utf8Count`, `writeUTF8(to:)`, and `makeString()`, while cstree's `SyntaxText` (`syntax/text.rs`) offers empty checks, search, slicing, chunk iteration/folding, and equality without forcing a full `String` allocation. Cambium has since filled in the byte-first slice: `isEmpty`, `forEachUTF8Chunk`, byte and byte-sequence search, `sliced(_:)`, and equality against `String` and other `SyntaxText` values are implemented and covered by focused tests.
+
+The remaining gap is mostly spec/API shape, not the old implementation gap. The architecture doc should be updated to describe this byte-oriented contract directly and to decide whether higher-level Unicode scalar/character helpers such as `contains_char`, `find_char`, or `char_at` belong on `SyntaxText` itself or in a separate utility layer.
 
 ### C3. The spec didn't define `TokenAtOffset.Between`
 
@@ -171,9 +179,9 @@ cstree's `token_at_offset` (`syntax/node.rs:848`, `utility_types.rs:133`) return
 
 Spec lists `staticText | interned(TokenKey) | ownedLargeText(LargeTokenTextID)`. The implementation faithfully kept this set. But "missing" is a different concept — an absent token of a kind that has static text. Conflating it into `.staticText + length 0` is exactly the bug at A5. Spec §8.2 mentions missing-token semantics (zero text length) but never says how to distinguish "missing" from "real static text" at storage level.
 
-### C5. The spec said `node.kind`, `node.textRange`, `token.text` "must not actor-hop" but never said "must not lock"
+### C5. Resolved in implementation: the spec said `node.kind`, `node.textRange`, `token.text` "must not actor-hop" but never said "must not lock"
 
-Avoiding actors is necessary but insufficient. The implementation chose mutex-protected reads, which are not actor-isolated but are still synchronisation points. The spec's performance goals (§3.2: "no per-node ARC traffic", "no per-red-node class allocation") implicitly assumed lock-free reads but never said it directly.
+Avoiding actors is necessary but insufficient. The original implementation chose mutex-protected reads, which were not actor-isolated but were still synchronisation points. The A1 fix corrected the implementation by making cursor reads and realized-child reads lock-free. The spec should still be clarified: the performance goals (§3.2: "no per-node ARC traffic", "no per-red-node class allocation") implicitly assumed lock-free reads, but did not say so directly.
 
 ### C6. Spec promised "predictable copying/sharing"; the cache eviction is unpredictable
 
