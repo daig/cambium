@@ -28,6 +28,7 @@ public enum GreenCachePolicy: Sendable, Hashable {
 }
 
 final class LocalTokenInternerStorage: @unchecked Sendable {
+    let tokenKeyNamespace = TokenKeyNamespace()
     var keysByText: [[UInt8]: TokenKey] = [:]
     var textByKey: [String] = []
     var largeText: [String] = []
@@ -68,8 +69,12 @@ public struct LocalTokenInterner: ~Copyable {
         return id
     }
 
-    public borrowing func snapshot() -> TokenTextResolver {
-        TokenTextResolver(interned: storage.textByKey, large: storage.largeText)
+    public borrowing func snapshot() -> TokenTextSnapshot {
+        TokenTextSnapshot(
+            interned: storage.textByKey,
+            large: storage.largeText,
+            namespace: storage.tokenKeyNamespace
+        )
     }
 }
 
@@ -117,6 +122,7 @@ public final class SharedTokenInterner: TokenResolver, @unchecked Sendable {
     }
 
     private let shards: [MutexBox<Shard>]
+    public let tokenKeyNamespace: TokenKeyNamespace? = TokenKeyNamespace()
 
     public init(shardCount: Int = 8) {
         precondition(shardCount > 0, "SharedTokenInterner requires at least one shard")
@@ -264,6 +270,16 @@ public struct GreenNodeCache<Lang: SyntaxLanguage>: ~Copyable {
         return interner.intern(text)
     }
 
+    public mutating func intern(_ bytes: UnsafeBufferPointer<UInt8>) -> TokenKey {
+        var interner = LocalTokenInterner(storage: storage.interner)
+        return interner.intern(bytes)
+    }
+
+    public mutating func storeLargeText(_ text: String) -> LargeTokenTextID {
+        var interner = LocalTokenInterner(storage: storage.interner)
+        return interner.storeLargeText(text)
+    }
+
     public mutating func makeToken(
         kind: RawSyntaxKind,
         textLength: TextSize,
@@ -364,17 +380,56 @@ struct OpenNode {
     var firstChildIndex: Int
 }
 
-public struct GreenBuildResult<Lang: SyntaxLanguage>: Sendable {
+/// Cacheless snapshot of a finished green tree.
+///
+/// This is the copyable `root + token text` view of a tree. It is sufficient
+/// for rendering, serialization, and creating a `SyntaxTree`, but it does not
+/// carry the reusable builder cache needed for identity-preserving incremental
+/// reuse.
+public struct GreenTreeSnapshot<Lang: SyntaxLanguage>: Sendable {
     public let root: GreenNode<Lang>
-    public let resolver: TokenTextResolver
+    public let tokenText: TokenTextSnapshot
 
-    public init(root: GreenNode<Lang>, resolver: TokenTextResolver) {
+    public init(root: GreenNode<Lang>, tokenText: TokenTextSnapshot) {
         self.root = root
-        self.resolver = resolver
+        self.tokenText = tokenText
     }
 
     public func makeSyntaxTree() -> SyntaxTree<Lang> {
-        SyntaxTree(root: root, resolver: resolver)
+        SyntaxTree(root: root, resolver: tokenText)
+    }
+}
+
+/// Result of finishing a builder.
+///
+/// The result includes the reusable cache so parse-session and incremental
+/// workflows naturally carry green storage and token-key namespace forward to
+/// the next builder.
+public struct GreenBuildResult<Lang: SyntaxLanguage>: ~Copyable {
+    public let root: GreenNode<Lang>
+    public let tokenText: TokenTextSnapshot
+    private var cache: GreenNodeCache<Lang>
+
+    public init(
+        root: GreenNode<Lang>,
+        tokenText: TokenTextSnapshot,
+        cache: consuming GreenNodeCache<Lang>
+    ) {
+        self.root = root
+        self.tokenText = tokenText
+        self.cache = cache
+    }
+
+    public var snapshot: GreenTreeSnapshot<Lang> {
+        GreenTreeSnapshot(root: root, tokenText: tokenText)
+    }
+
+    /// Consume this result and return the cache for the next builder.
+    ///
+    /// Read `root`, `tokenText`, `snapshot`, or `makeSyntaxTree()` before calling
+    /// this method.
+    public consuming func intoCache() -> GreenNodeCache<Lang> {
+        cache
     }
 }
 
@@ -382,6 +437,7 @@ final class OverlayTokenResolver: TokenResolver, @unchecked Sendable {
     private let base: any TokenResolver
     private let interned: [TokenKey: String]
     private let large: [LargeTokenTextID: String]
+    let tokenKeyNamespace: TokenKeyNamespace? = nil
 
     init(
         base: any TokenResolver,
@@ -484,6 +540,68 @@ struct ReplacementTokenRemapper<Lang: SyntaxLanguage> {
                 nextLarge -= 1
                 largeMap[id] = newID
                 large[newID] = replacementResolver.resolveLargeText(id)
+                return newID
+            }()
+            text = .ownedLargeText(mapped)
+        }
+        return cache.makeToken(kind: token.rawKind, textLength: token.textLength, text: text)
+    }
+}
+
+struct ReusedSubtreeTokenRemapper<Lang: SyntaxLanguage> {
+    var internedMap: [TokenKey: TokenKey] = [:]
+    var largeMap: [LargeTokenTextID: LargeTokenTextID] = [:]
+
+    mutating func remap(
+        node: GreenNode<Lang>,
+        sourceResolver: any TokenResolver,
+        cache: inout GreenNodeCache<Lang>
+    ) throws -> GreenNode<Lang> {
+        var children: [GreenElement<Lang>] = []
+        children.reserveCapacity(node.childCount)
+        for childIndex in 0..<node.childCount {
+            switch node.child(at: childIndex) {
+            case .node(let child):
+                children.append(.node(try remap(
+                    node: child,
+                    sourceResolver: sourceResolver,
+                    cache: &cache
+                )))
+            case .token(let token):
+                children.append(.token(remap(
+                    token: token,
+                    sourceResolver: sourceResolver,
+                    cache: &cache
+                )))
+            }
+        }
+        return try cache.makeNode(kind: node.rawKind, children: children)
+    }
+
+    mutating func remap(
+        token: GreenToken<Lang>,
+        sourceResolver: any TokenResolver,
+        cache: inout GreenNodeCache<Lang>
+    ) -> GreenToken<Lang> {
+        let text: TokenTextStorage
+        switch token.textStorage {
+        case .staticText:
+            text = .staticText
+        case .missing:
+            text = .missing
+        case .interned(let key):
+            let mapped = internedMap[key] ?? {
+                let newKey = sourceResolver.withUTF8(key) { bytes in
+                    cache.intern(bytes)
+                }
+                internedMap[key] = newKey
+                return newKey
+            }()
+            text = .interned(mapped)
+        case .ownedLargeText(let id):
+            let mapped = largeMap[id] ?? {
+                let newID = cache.storeLargeText(sourceResolver.resolveLargeText(id))
+                largeMap[id] = newID
                 return newID
             }()
             text = .ownedLargeText(mapped)
@@ -627,14 +745,52 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
         children.removeSubrange(checkpoint.childCount...)
     }
 
-    public mutating func reuseSubtree(_ node: borrowing SyntaxNodeCursor<Lang>) {
+    /// Append an existing subtree to this builder.
+    ///
+    /// If `node`'s resolver shares this builder's token-key namespace, the
+    /// green node is appended directly and storage identity is preserved. If
+    /// namespaces differ, dynamic token keys are remapped into this builder's
+    /// interner before appending.
+    public mutating func reuseSubtree(_ node: borrowing SyntaxNodeCursor<Lang>) throws {
         precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
-        node.green { green in
-            children.append(.node(green))
+        let sourceResolver = node.resolver
+        if let sourceNamespace = sourceResolver.tokenKeyNamespace,
+           sourceNamespace === cacheStorage.interner.tokenKeyNamespace
+        {
+            node.green { green in
+                children.append(.node(green))
+            }
+            return
         }
+
+        var cache = GreenNodeCache<Lang>(storage: cacheStorage)
+        var remapper = ReusedSubtreeTokenRemapper<Lang>()
+        let remapped = try node.green { green in
+            try remapper.remap(
+                node: green,
+                sourceResolver: sourceResolver,
+                cache: &cache
+            )
+        }
+        children.append(.node(remapped))
     }
 
+    /// Finish the tree and return the builder's reusable cache.
+    ///
+    /// The returned cache carries both green-node cache contents and the
+    /// token-key namespace needed for identity-preserving `reuseSubtree` in a
+    /// later builder.
     public consuming func finish() throws -> GreenBuildResult<Lang> {
+        let root = try finishRoot()
+        let interner = LocalTokenInterner(storage: cacheStorage.interner)
+        return GreenBuildResult(
+            root: root,
+            tokenText: interner.snapshot(),
+            cache: GreenNodeCache(storage: cacheStorage)
+        )
+    }
+
+    private mutating func finishRoot() throws -> GreenNode<Lang> {
         if !parents.isEmpty {
             throw GreenTreeBuilderError.unbalancedStartNodes(parents.count)
         }
@@ -648,8 +804,7 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
             throw GreenTreeBuilderError.noRoot
         }
         finished = true
-        let interner = LocalTokenInterner(storage: cacheStorage.interner)
-        return GreenBuildResult(root: root, resolver: interner.snapshot())
+        return root
     }
 
     private func validate(_ checkpoint: BuilderCheckpoint) throws {
@@ -753,14 +908,14 @@ public extension SharedSyntaxTree {
     }
 
     /// Same as `replacing(_:with:cache:)` for `GreenNode`, but accepts a
-    /// `GreenBuildResult` produced by an independent `GreenTreeBuilder`.
+    /// cacheless snapshot produced by an independent `GreenTreeBuilder`.
     /// Token interner keys in the replacement are remapped through `cache`
     /// so the returned tree's resolver can resolve them; the witness's
     /// `newSubtree` is the remapped subtree (which is what actually lives
     /// in the new tree).
     func replacing(
         _ handle: SyntaxNodeHandle<Lang>,
-        with replacement: GreenBuildResult<Lang>,
+        with replacement: GreenTreeSnapshot<Lang>,
         cache: inout GreenNodeCache<Lang>
     ) throws -> ReplacementResult<Lang> {
         precondition(
@@ -770,7 +925,7 @@ public extension SharedSyntaxTree {
         var remapper = ReplacementTokenRemapper<Lang>()
         let remappedReplacement = try remapper.remap(
             node: replacement.root,
-            replacementResolver: replacement.resolver,
+            replacementResolver: replacement.tokenText,
             cache: &cache
         )
 
@@ -816,5 +971,15 @@ public extension SharedSyntaxTree {
             tree: SyntaxTree(root: newRoot, resolver: overlay),
             witness: witness
         )
+    }
+
+    /// Same as `replacing(_:with:cache:)` for `GreenTreeSnapshot`, but borrows
+    /// the snapshot view from a cache-preserving build result.
+    func replacing(
+        _ handle: SyntaxNodeHandle<Lang>,
+        with replacement: borrowing GreenBuildResult<Lang>,
+        cache: inout GreenNodeCache<Lang>
+    ) throws -> ReplacementResult<Lang> {
+        try replacing(handle, with: replacement.snapshot, cache: &cache)
     }
 }

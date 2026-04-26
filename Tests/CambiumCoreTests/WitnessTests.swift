@@ -214,7 +214,7 @@ import Testing
     try prevBuilder.token(.identifier, text: "abc")
     try prevBuilder.finishNode()
     try prevBuilder.finishNode()
-    let previous = try prevBuilder.finish().makeSyntaxTree().share()
+    let previous = try prevBuilder.finish().snapshot.makeSyntaxTree().share()
 
     let session = IncrementalParseSession<TestLanguage>()
     let oracle = session.makeReuseOracle(previousTree: previous)
@@ -240,5 +240,5 @@ private func makeTwoListRoot() throws -> SyntaxTree<TestLanguage> {
     try builder.token(.identifier, text: "old")
     try builder.finishNode()
     try builder.finishNode()
-    return try builder.finish().makeSyntaxTree()
+    return try builder.finish().snapshot.makeSyntaxTree()
 }

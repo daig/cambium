@@ -57,7 +57,7 @@ private func makeTraversalTree() throws -> SyntaxTree<TestLanguage> {
     try builder.token(.identifier, text: "z")
     try builder.finishNode()
 
-    return try builder.finish().makeSyntaxTree()
+    return try builder.finish().snapshot.makeSyntaxTree()
 }
 
 private func makeSyntaxTextTree() throws -> SyntaxTree<TestLanguage> {
@@ -73,7 +73,7 @@ private func makeSyntaxTextTree() throws -> SyntaxTree<TestLanguage> {
     try builder.finishNode()
     try builder.finishNode()
 
-    return try builder.finish().makeSyntaxTree()
+    return try builder.finish().snapshot.makeSyntaxTree()
 }
 
 private func describeElement(_ element: borrowing SyntaxElementCursor<TestLanguage>) -> String {
@@ -205,7 +205,7 @@ private func makeWideTraversalFixture() throws -> WideTraversalFixture {
     try builder.finishNode()
 
     return WideTraversalFixture(
-        tree: try builder.finish().makeSyntaxTree(),
+        tree: try builder.finish().snapshot.makeSyntaxTree(),
         topLevelElements: topLevelElements,
         descendants: descendants,
         tokens: tokens,
@@ -267,7 +267,7 @@ private func describeElementWalkEvent(_ event: borrowing SyntaxElementWalkEvent<
     try builder.finishNode()
 
     let result = try builder.finish()
-    let tree = result.makeSyntaxTree()
+    let tree = result.snapshot.makeSyntaxTree()
     let text = tree.withRoot { root in
         root.makeString()
     }
@@ -398,7 +398,7 @@ private func describeElementWalkEvent(_ event: borrowing SyntaxElementWalkEvent<
     try builder.finishNode()
 
     let result = try builder.finish()
-    let tree = result.makeSyntaxTree()
+    let tree = result.snapshot.makeSyntaxTree()
 
     let childKind = tree.withRoot { root in
         root.withChildNode(at: 0) { child in
@@ -429,7 +429,7 @@ private func describeElementWalkEvent(_ event: borrowing SyntaxElementWalkEvent<
     try builder.finishNode()
 
     let result = try builder.finish()
-    let tree = result.makeSyntaxTree()
+    let tree = result.snapshot.makeSyntaxTree()
     let shared = tree.share()
 
     let tokenAtFive = shared.withRoot { root in
@@ -862,7 +862,7 @@ private func describeElementWalkEvent(_ event: borrowing SyntaxElementWalkEvent<
     try builder.finishNode()
 
     let buildResult = try builder.finish()
-    let tree = buildResult.makeSyntaxTree()
+    let tree = buildResult.snapshot.makeSyntaxTree()
     let shared = tree.share()
 
     let listHandle = shared.withRoot { root in
@@ -923,7 +923,7 @@ private enum ListSpec: TypedSyntaxNode {
     try builder.finishNode()
 
     let result = try builder.finish()
-    let tree = result.makeSyntaxTree()
+    let tree = result.snapshot.makeSyntaxTree()
     let handle = tree.withRoot { root in
         root.withChildNode(at: 0) { child in
             child.makeHandle()
@@ -950,7 +950,7 @@ private enum ListSpec: TypedSyntaxNode {
     try builder.finishNode()
 
     let result = try builder.finish()
-    let tree = result.makeSyntaxTree()
+    let tree = result.snapshot.makeSyntaxTree()
     let originalTreeID = tree.treeID
     let bytes = try tree.serializeGreenSnapshot()
     let decoded = try GreenSnapshotDecoder.decodeTree(bytes, as: TestLanguage.self)
@@ -974,13 +974,13 @@ private enum ListSpec: TypedSyntaxNode {
     try builder.finishNode()
 
     let result = try builder.finish()
-    let tree = result.makeSyntaxTree()
+    let tree = result.snapshot.makeSyntaxTree()
     let bytes = try tree.withRoot { root in
         try root.withChildNode(at: 1) { child in
             try child.serializeGreenSubtree()
         }!
     }
-    let decoded = try GreenSnapshotDecoder.decodeBuildResult(bytes, as: TestLanguage.self)
+    let decoded = try GreenSnapshotDecoder.decodeSnapshot(bytes, as: TestLanguage.self)
     let decodedTree = decoded.makeSyntaxTree()
 
     let text = decodedTree.withRoot { root in
@@ -999,7 +999,7 @@ private enum ListSpec: TypedSyntaxNode {
     try builder.finishNode()
 
     let buildResult = try builder.finish()
-    let tree = buildResult.makeSyntaxTree()
+    let tree = buildResult.snapshot.makeSyntaxTree()
     let shared = tree.share()
     let listHandle = shared.withRoot { root in
         root.withChildNode(at: 0) { child in
@@ -1030,7 +1030,7 @@ private enum ListSpec: TypedSyntaxNode {
     builder.startNode(.root)
     try builder.token(.identifier, text: "a")
     try builder.finishNode()
-    let bytes = try builder.finish().serializeGreenSnapshot()
+    let bytes = try builder.finish().snapshot.serializeGreenSnapshot()
 
     #expect(throws: CambiumSerializationError.languageMismatch(
         expectedID: OtherLanguage.serializationID,
@@ -1051,7 +1051,7 @@ private enum ListSpec: TypedSyntaxNode {
     builder.startNode(.root)
     try builder.staticToken(.plus)
     try builder.finishNode()
-    var bytes = try builder.finish().serializeGreenSnapshot()
+    var bytes = try builder.finish().snapshot.serializeGreenSnapshot()
 
     let plusKind = Array(UInt32(TestKind.plus.rawValue).littleEndianBytes)
     let plusIndex = bytes.firstIndex(ofSequence: plusKind)!
@@ -1072,7 +1072,7 @@ private enum ListSpec: TypedSyntaxNode {
     builder.startNode(.root)
     try builder.token(.identifier, text: "a")
     try builder.finishNode()
-    var bytes = try builder.finish().serializeGreenSnapshot()
+    var bytes = try builder.finish().snapshot.serializeGreenSnapshot()
 
     let identifierKind = Array(UInt32(TestKind.identifier.rawValue).littleEndianBytes)
     let identifierIndex = bytes.firstIndex(ofSequence: identifierKind)!

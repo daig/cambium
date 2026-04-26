@@ -252,7 +252,7 @@ public final class SyntaxTreeStorage<Lang: SyntaxLanguage>: @unchecked Sendable 
 public struct SyntaxTree<Lang: SyntaxLanguage>: ~Copyable, Sendable {
     internal let storage: SyntaxTreeStorage<Lang>
 
-    public init(root: GreenNode<Lang>, resolver: any TokenResolver = TokenTextResolver()) {
+    public init(root: GreenNode<Lang>, resolver: any TokenResolver = TokenTextSnapshot()) {
         self.storage = SyntaxTreeStorage(rootGreen: root, resolver: resolver)
     }
 

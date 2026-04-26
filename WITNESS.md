@@ -209,7 +209,7 @@ Note that the witness alone tells you *what* changed; it does not pre-translate 
 
 - **Replacement at root (path is empty).** The entire tree is replaced; every previously-tracked handle is deleted. This is a degenerate but legal case.
 - **Replacement that doesn't change identity.** If the replacement subtree is the same live green node as the old subtree, the returned tree is rooted at `oldRoot`, the witness is still emitted, and `classify(path:)` returns `.unchanged` for every path.
-- **Replacement that consumes a `GreenBuildResult` with its own resolver.** This is the path that today goes through `ReplacementTokenRemapper`. The witness vocabulary is unaffected by interner remapping; the witness describes structural change, not resolver state.
+- **Replacement that consumes a `GreenTreeSnapshot` with its own token-text snapshot.** This is the path that today goes through `ReplacementTokenRemapper`. The witness vocabulary is unaffected by interner remapping; the witness describes structural change, not resolver state.
 
 ---
 

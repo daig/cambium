@@ -6,7 +6,9 @@ Status update: A1/B1/B6 are now resolved by the lock-free red cursor read
 refactor. A2/A3 are now resolved by cached node-child counts and running
 child-start offsets during traversal. B2 remains open, but is downgraded to a
 cold-path contention and benchmark question rather than a hot-read defect. The
-remaining critical correctness concern is the silent correctness bug in A6.
+remaining critical correctness bugs from the original A-series have been
+resolved. The main remaining gaps are operational/API completeness and
+performance proof items.
 
 ---
 
@@ -86,7 +88,7 @@ Previously `missingToken(_:)` constructed tokens with `text: .staticText, textLe
 
 Resolved by adding a distinct `case missing` to `TokenTextStorage` (a sentinel meaning "absent"; renders as empty). `missingToken(_:)` now uses `.missing`, the structural hash mixes a fourth tag value to keep `.missing` and `.staticText` cache-distinct, and the snapshot serializer writes a new `missingText` tag so the distinction round-trips. `MissingTokenTests.swift` covers the rendering, hash distinction, and serialization round trip.
 
-### A6. `GreenTreeBuilder.reuseSubtree` does not remap interner keys
+### A6. Fixed: `GreenTreeBuilder.reuseSubtree` did not remap interner keys
 
 **Where:** `GreenTreeBuilder.swift:578–583`:
 
@@ -99,9 +101,9 @@ public mutating func reuseSubtree(_ node: borrowing SyntaxNodeCursor<Lang>) {
 }
 ```
 
-The borrowed subtree's `TokenKey`s point into *its* tree's interner. Appending the green node into a different builder's children leaves those keys aliasing whatever happens to be in the new builder's interner — wrong text on resolution, no error. Cambium has the right machinery already (`ReplacementTokenRemapper`, `OverlayTokenResolver`), but only the replacement path uses it. Reuse silently doesn't.
+The borrowed subtree's `TokenKey`s point into *its* tree's interner. Appending the green node into a different builder's children used to leave those keys aliasing whatever happened to be in the new builder's interner — wrong text on resolution, no error.
 
-It is correct only when the builder shares the source tree's resolver verbatim (e.g. inside one `IncrementalParseSession`). The API doesn't enforce that.
+Fixed by giving resolvers a `TokenKeyNamespace` identity and making `reuseSubtree` namespace-aware. If the source resolver and builder cache share the same token namespace, the builder appends the green node directly and preserves green storage identity. If they differ, the builder remaps interned and large-token keys into its own cache/interner while preserving static and missing tokens.
 
 ### A7. Resolved-by-removal: Anchor "nearby" resolution was hard-capped at 64 bytes
 
@@ -125,9 +127,9 @@ Fixed by centralizing the 8/24 key layout in `SharedTokenInternerKeyLayout`, con
 
 **Where:** historical `GreenTreeBuilder.swift:100`. `abs(Int.min)` traps. Hash values can in principle land on `Int.min`. Fixed by selecting the shard with `UInt(bitPattern: keyBytes.hashValue) % UInt(shards.count)`.
 
-### A10. The cache cannot be reused across builders
+### A10. Fixed: The cache could not be reused across builders
 
-`GreenTreeBuilder.finish() -> GreenBuildResult` returns root + resolver but discards `cacheStorage`. cstree's `finish()` returns `(GreenNode, Option<NodeCache>)`, allowing `into_interner()` and reuse for the next build — the central pattern for incremental parsing. Cambium has no extraction API; cross-builder structural sharing requires holding a `GreenNodeCache` outside and constructing each builder via `init(cache:)`, but you can never get it back from the builder. This is the cache half of arch §19.1's "shared green node cache" goal, half-built.
+`GreenTreeBuilder.finish() -> GreenBuildResult` now returns root + `TokenTextSnapshot` + the reusable `GreenNodeCache`, matching cstree's "finish and carry the cache/interner forward" pattern. The cacheless view is explicit as `GreenTreeSnapshot` via `result.snapshot`. Reusing the returned cache in the next builder also carries the token namespace forward, which lets `reuseSubtree` preserve green identity for unchanged subtrees from the previous tree.
 
 ---
 
@@ -202,7 +204,7 @@ Spec §25.4 prescribes "maximum bytes; maximum entries; eviction strategy; instr
 | # | cstree has | Cambium status | Notes |
 |---|---|---|---|
 | D1 | `TokenAtOffset` (None/Single/Between) | only Optional from `withToken(at:)` | Editor cursor placement at boundaries can't disambiguate |
-| D2 | Builder cache extraction after `finish` | None | Blocks cross-builder structural sharing without lifetime gymnastics |
+| D2 | Builder cache extraction after `finish` | `finish()` returns cache-preserving `GreenBuildResult` | OK |
 | D3 | Static-text validation in `builder.token(_:text:)` | None | cstree `debug_assert_eq!(static_text, text)` (`green/builder.rs:408`); silently allows mismatched-text static-kind tokens |
 | D4 | Per-node user data type `D` | Sidecar `SyntaxMetadataStore` only | Different design choice, but no equivalent to `try_set_data` / `clear_data` directly on a node |
 | D5 | `siblings(direction)` returning a lazy iterator | callback-style `forEachSibling` | No `break`/`filter`/`collect` composition without buffer allocation |
@@ -221,9 +223,9 @@ Spec §25.4 prescribes "maximum bytes; maximum entries; eviction strategy; instr
 
 ## E. Test coverage gaps that mask the bugs above
 
-- **Concurrency coverage is still incomplete.** A1/B1 now have focused concurrent lazy-realization coverage, but A6, shared interner/cache contention, and broader Thread Sanitizer coverage still need CI-level follow-through. Arch §28 #8/#9 listed "Concurrent traversal tests" and "Thread Sanitizer suite" as required.
+- **Concurrency coverage is still incomplete.** A1/B1 now have focused concurrent lazy-realization coverage, but shared interner/cache contention and broader Thread Sanitizer coverage still need CI-level follow-through. Arch §28 #8/#9 listed "Concurrent traversal tests" and "Thread Sanitizer suite" as required.
 - **`missingToken(.plus)`-style coverage is present.** `MissingTokenTests.swift` covers A5 directly: empty rendering, structural-hash distinction from the static-text variant, and serialization round-trip.
-- **No cross-interner `reuseSubtree` test.** A6 hides because tests don't reuse a subtree from a tree with a different interner.
+- **Cross-interner `reuseSubtree` coverage is present.** `BuilderReuseTests.swift` covers remapping from a different interner and identity-preserving reuse through the cache returned by `finish()`.
 - **Wide-node traversal coverage is now present.** A focused mixed node/token
   test covers the A2/A3 offset and node-count regression surface.
 - **SharedTokenInterner key-layout coverage is present.** Focused tests cover A8/A9 without allocating 16 M strings.
@@ -235,10 +237,8 @@ Spec §25.4 prescribes "maximum bytes; maximum entries; eviction strategy; instr
 
 ## Recommended priority
 
-1. **A6** — silent correctness bug that will eventually bite real users. (A5 fixed.)
-2. **A10** — operational gap that limits incremental parsing usefulness. (A4 fixed; A7 removed by witness redesign.)
-3. **B4** — benchmark repeated random lookups on wide nodes before adding an offset table.
-4. **C-series spec fixes** — update arch doc to make `TokenAtOffset.Between`, `missing`-as-distinct-storage, and lock-free read goals explicit, so future contributors don't re-derive the wrong constraints.
-5. **D-series and roadmap** — most of D maps onto roadmap priorities 2/3; D1, D2, D3 should be added.
+1. **B4** — benchmark repeated random lookups on wide nodes before adding an offset table.
+2. **C-series spec fixes** — update arch doc to make `TokenAtOffset.Between`, `missing`-as-distinct-storage, and lock-free read goals explicit, so future contributors don't re-derive the wrong constraints.
+3. **D-series and roadmap** — most of D maps onto roadmap priorities 2/3; D1 and D3 should be added.
 
-Cambium's *shape* matches the architecture spec well — green/red split, noncopyable builder, witness-based cross-tree identity, replacement, serialization, macro-derived kinds. Where it still diverges is mostly invisible from happy-path tests (A6). A focused pass on the remaining silent correctness bug would close the largest gap with the spec without re-architecting.
+Cambium's *shape* matches the architecture spec well — green/red split, noncopyable builder, witness-based cross-tree identity, replacement, serialization, macro-derived kinds. The original silent correctness bugs in the A-series are now resolved; remaining work is mostly API completeness, documentation alignment, and performance validation.

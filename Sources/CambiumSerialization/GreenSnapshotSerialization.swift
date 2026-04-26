@@ -421,14 +421,14 @@ public enum GreenSnapshotDecoder {
         _ bytes: [UInt8],
         as language: Lang.Type = Lang.self
     ) throws -> SyntaxTree<Lang> {
-        let result: GreenBuildResult<Lang> = try decodeBuildResult(bytes, as: language)
-        return result.makeSyntaxTree()
+        let snapshot: GreenTreeSnapshot<Lang> = try decodeSnapshot(bytes, as: language)
+        return snapshot.makeSyntaxTree()
     }
 
-    public static func decodeBuildResult<Lang: SyntaxLanguage>(
+    public static func decodeSnapshot<Lang: SyntaxLanguage>(
         _ bytes: [UInt8],
         as language: Lang.Type = Lang.self
-    ) throws -> GreenBuildResult<Lang> {
+    ) throws -> GreenTreeSnapshot<Lang> {
         var decoder = GreenSnapshotDecodedTreeBuilder<Lang>(bytes: bytes)
         return try decoder.decode()
     }
@@ -441,7 +441,7 @@ private struct GreenSnapshotDecodedTreeBuilder<Lang: SyntaxLanguage> {
         self.reader = BinaryReader(bytes: bytes)
     }
 
-    mutating func decode() throws -> GreenBuildResult<Lang> {
+    mutating func decode() throws -> GreenTreeSnapshot<Lang> {
         try reader.readMagic()
         let formatVersion = try reader.readUInt32()
         guard formatVersion == GreenSnapshotFormat.version else {
@@ -479,9 +479,9 @@ private struct GreenSnapshotDecodedTreeBuilder<Lang: SyntaxLanguage> {
             throw CambiumSerializationError.rootIsToken(rootID)
         }
 
-        return GreenBuildResult(
+        return GreenTreeSnapshot(
             root: root,
-            resolver: TokenTextResolver(interned: internedTexts, large: largeTexts)
+            tokenText: TokenTextSnapshot(interned: internedTexts, large: largeTexts)
         )
     }
 
@@ -753,9 +753,9 @@ public extension SyntaxNodeCursor {
     }
 }
 
-public extension GreenBuildResult {
+public extension GreenTreeSnapshot {
     func serializeGreenSnapshot() throws -> [UInt8] {
-        try encodeGreenSnapshot(root: root, resolver: resolver)
+        try encodeGreenSnapshot(root: root, resolver: tokenText)
     }
 }
 

@@ -37,6 +37,16 @@ public struct LargeTokenTextID: RawRepresentable, Sendable, Hashable, Comparable
     }
 }
 
+/// Identity of a token-key namespace.
+///
+/// `TokenKey` and `LargeTokenTextID` values are only meaningful inside the
+/// namespace produced by one interner/resolver family. Builders can use this
+/// identity to decide whether a green subtree may be reused directly or must
+/// have its dynamic token keys remapped.
+public final class TokenKeyNamespace: @unchecked Sendable {
+    public init() {}
+}
+
 public enum TokenTextStorage: Sendable, Hashable {
     /// Renders the kind's static text from `Lang.staticText(for:)`.
     /// Token length must equal the static text's UTF-8 byte length.
@@ -50,6 +60,13 @@ public enum TokenTextStorage: Sendable, Hashable {
 }
 
 public protocol TokenResolver: Sendable {
+    /// Namespace for token keys this resolver can resolve, if it has a single
+    /// coherent namespace.
+    ///
+    /// Resolvers that compose multiple namespaces, such as overlays, should
+    /// return `nil` so builders remap reused subtrees conservatively.
+    var tokenKeyNamespace: TokenKeyNamespace? { get }
+
     func resolve(_ key: TokenKey) -> String
     func resolveLargeText(_ id: LargeTokenTextID) -> String
 
@@ -65,6 +82,10 @@ public protocol TokenResolver: Sendable {
 }
 
 public extension TokenResolver {
+    var tokenKeyNamespace: TokenKeyNamespace? {
+        nil
+    }
+
     func resolveLargeText(_ id: LargeTokenTextID) -> String {
         preconditionFailure("Resolver does not contain large token text \(id.rawValue)")
     }
@@ -79,13 +100,28 @@ public extension TokenResolver {
     }
 }
 
-public final class TokenTextResolver: TokenResolver, @unchecked Sendable {
+/// Immutable token-text table for a finished green tree.
+///
+/// A snapshot resolves token keys that already exist in the tree it was
+/// created with. It does not intern new text and does not observe future
+/// mutations to a builder cache that shares the same namespace.
+public struct TokenTextSnapshot: TokenResolver, Sendable {
     private let interned: [String]
     private let large: [String]
+    public let namespace: TokenKeyNamespace
 
-    public init(interned: [String] = [], large: [String] = []) {
+    public var tokenKeyNamespace: TokenKeyNamespace? {
+        namespace
+    }
+
+    public init(
+        interned: [String] = [],
+        large: [String] = [],
+        namespace: TokenKeyNamespace = TokenKeyNamespace()
+    ) {
         self.interned = interned
         self.large = large
+        self.namespace = namespace
     }
 
     public func resolve(_ key: TokenKey) -> String {

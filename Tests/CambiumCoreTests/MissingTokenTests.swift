@@ -12,7 +12,7 @@ import Testing
     builder.missingToken(.plus)
     try builder.finishNode()
 
-    let tree = try builder.finish().makeSyntaxTree()
+    let tree = try builder.finish().snapshot.makeSyntaxTree()
 
     let text = tree.withRoot { $0.makeString() }
     #expect(text == "")
@@ -33,13 +33,13 @@ import Testing
     staticBuilder.startNode(.root)
     try staticBuilder.staticToken(.plus)
     try staticBuilder.finishNode()
-    let staticTree = try staticBuilder.finish().makeSyntaxTree()
+    let staticTree = try staticBuilder.finish().snapshot.makeSyntaxTree()
 
     var missingBuilder = GreenTreeBuilder<TestLanguage>()
     missingBuilder.startNode(.root)
     missingBuilder.missingToken(.plus)
     try missingBuilder.finishNode()
-    let missingTree = try missingBuilder.finish().makeSyntaxTree()
+    let missingTree = try missingBuilder.finish().snapshot.makeSyntaxTree()
 
     // Same kind, different storage: structural hashes must diverge so cache
     // dedup doesn't collapse them.
@@ -59,7 +59,7 @@ import Testing
     try builder.token(.identifier, text: "y")
     try builder.finishNode()
 
-    let original = try builder.finish().makeSyntaxTree()
+    let original = try builder.finish().snapshot.makeSyntaxTree()
     let bytes = try original.serializeGreenSnapshot()
     let decoded = try GreenSnapshotDecoder.decodeTree(bytes, as: TestLanguage.self)
 

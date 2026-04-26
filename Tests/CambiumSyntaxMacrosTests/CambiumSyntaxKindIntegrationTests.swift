@@ -65,7 +65,7 @@ private enum MacroLanguage: SyntaxLanguage {
     try builder.finishNode()
 
     let result = try builder.finish()
-    let tree = result.makeSyntaxTree()
+    let tree = result.snapshot.makeSyntaxTree()
     let text = tree.withRoot { root in
         root.makeString()
     }

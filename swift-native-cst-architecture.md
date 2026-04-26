@@ -592,6 +592,8 @@ Use a split similar to `cstree`: builders need an interner; finished trees need 
 
 ```swift
 public protocol TokenResolver: Sendable {
+    var tokenKeyNamespace: TokenKeyNamespace? { get }
+
     func resolve(_ key: TokenKey) -> String
 
     func withUTF8<R>(
@@ -603,9 +605,18 @@ public protocol TokenResolver: Sendable {
 public protocol TokenInterner: TokenResolver {
     mutating func intern(_ bytes: UnsafeBufferPointer<UInt8>) -> TokenKey
 }
+
+public struct TokenTextSnapshot: TokenResolver, Sendable {
+    // Immutable, point-in-time token text table for a finished tree.
+}
 ```
 
 Prefer interning from UTF-8 bytes, not from `String`, in parser hot paths.
+Resolvers that can identify their token-key namespace expose
+`tokenKeyNamespace`; builders use it to decide whether a reused green subtree
+can be appended directly or must have dynamic token keys remapped.
+Finished trees carry a `TokenTextSnapshot`, not a live interner; carrying the
+builder cache forward is the separate responsibility of `GreenBuildResult`.
 
 ### 10.3 Interner implementations
 
@@ -742,13 +753,16 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
     public mutating func startNode(at checkpoint: BuilderCheckpoint, _ kind: Lang.Kind)
     public mutating func revert(to checkpoint: BuilderCheckpoint)
 
-    public mutating func reuseSubtree(_ node: borrowing SyntaxNodeCursor<Lang>)
+    public mutating func reuseSubtree(_ node: borrowing SyntaxNodeCursor<Lang>) throws
 
     public consuming func finish() -> GreenBuildResult<Lang>
 }
 ```
 
 Noncopyability prevents accidental duplication of parser state, interner state, cache state, and internal child stacks.
+`finish()` returns the cache-preserving build result by default. Its
+`snapshot` property gives a copyable `GreenTreeSnapshot` view for APIs that
+only need `root + TokenTextSnapshot`.
 
 ### 12.2 Builder internals
 
@@ -1295,11 +1309,16 @@ Builder reuse:
 
 ```swift
 extension GreenTreeBuilder {
-    public mutating func reuseSubtree(_ node: borrowing SyntaxNodeCursor<Lang>)
+    public mutating func reuseSubtree(_ node: borrowing SyntaxNodeCursor<Lang>) throws
 }
 ```
 
-The parser decides invalidation boundaries and recovery. The CST library provides range lookup, green reuse, structural hashing, and cache reuse.
+If the source resolver and builder cache share a `TokenKeyNamespace`,
+`reuseSubtree` preserves the source green node storage directly. Otherwise it
+remaps interned and large-token keys into the builder's interner before
+appending the subtree. The parser decides invalidation boundaries and recovery;
+the CST library provides range lookup, green reuse, structural hashing, and
+cache reuse.
 
 ### 19.3 Bidirectional editor operations
 
@@ -1658,8 +1677,9 @@ var builder = GreenTreeBuilder<MyLang>(cache: consume cache)
 
 parser.parse(into: &builder)
 
-let result = builder.finish()
-var tree = result.intoSyntaxTree()
+let result = try builder.finish()
+var tree = result.makeSyntaxTree()
+cache = result.intoCache()
 
 tree.withRoot { root in
     root.visitPreorder { node in
@@ -1955,8 +1975,8 @@ Move-only GreenNodeCache
 Move-only GreenTreeBuilder
     ↓ consuming finish
 GreenBuildResult
-    ↓ consuming intoSyntaxTree
-Move-only SyntaxTree
+    ↙ borrowing makeSyntaxTree       ↘ consuming intoCache
+Move-only SyntaxTree             GreenNodeCache for next builder
 ```
 
 This makes the performant usage path the natural usage path. Users can still opt into copyable handles and convenience traversal, but they must do so explicitly.
