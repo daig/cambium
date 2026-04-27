@@ -9,115 +9,18 @@ performance risks that should be triaged before or shortly after v1.
 
 ## Validation Notes
 
-- Findings 1 through 5 were confirmed with temporary regression tests, then
-  removed.
-- The remaining findings are based on code inspection and traced behaviour
-  rather than executed tests; treat them as high-confidence but unvalidated
-  until tests land.
+- Findings 1, 2, and 3 below were confirmed with temporary regression tests
+  during the original audit pass; those tests were removed after capture.
+  (Two earlier findings from the same audited batch — wrong-resolver
+  replacement and snapshot-replacement identity collisions — have since been
+  fixed and removed from this list.)
+- Other findings here are based on code inspection and traced behaviour rather
+  than executed tests; treat them as high-confidence but unvalidated until
+  tests land.
 
 ## Priority 0: Correctness Bugs
 
-### 1. Bare `GreenNode` Replacement Can Resolve Token Text Through The Wrong Resolver
-
-**Severity:** Critical
-
-**Area:** `SharedSyntaxTree.replacing(_:with: GreenNode, cache:)`
-
-`SharedSyntaxTree.replacing(_:with: GreenNode, cache:)` splices the supplied
-green node into the old tree and returns a new `SyntaxTree` using the old
-tree's resolver. If the replacement green node came from a different builder or
-snapshot, its dynamic `TokenKey` values are meaningful only in that
-replacement's resolver namespace. The returned tree can therefore render the
-wrong text.
-
-Observed validation: replacing the second child in `"keepold"` with a fresh
-green subtree containing `"fresh"` rendered `"keepkeep"`, because the
-replacement's `TokenKey(0)` resolved against the old tree's resolver.
-
-Relevant code:
-
-- `Sources/CambiumBuilder/GreenTreeBuilder.swift`
-  - `replacing(_:with replacement: GreenNode, cache:)`
-  - `rebuildReplacing(root:path:replacement:cache:)`
-
-Why it matters:
-
-- Produces visibly wrong source text.
-- Can silently corrupt editor updates if callers choose the convenient
-  `GreenNode` overload after building a replacement elsewhere.
-- Witnesses then describe a replacement whose rendered text is not the
-  replacement text the caller supplied.
-
-Likely fix:
-
-- Restrict the `GreenNode` overload to same-resolver or known-static-only
-  replacements, or make it internal.
-- Prefer a resolver-carrying replacement API such as `GreenTreeSnapshot` /
-  `GreenBuildResult`.
-- If the overload remains public, require an explicit resolver or namespace
-  proof and remap dynamic tokens before splicing.
-
-Acceptance tests:
-
-- Replacing with a `GreenNode` from another builder either throws/traps with a
-  clear diagnostic or renders the replacement's original text.
-- Replacing with a same-tree green node still preserves identity for true
-  replacement-by-self.
-
-### 2. Snapshot Replacement Can Give Different Text The Same Green Identity
-
-**Severity:** Critical
-
-**Area:** replacement token remapping and green cache keys
-
-`ReplacementTokenRemapper` assigns synthetic dynamic token keys starting at
-`UInt32.max` for every snapshot replacement. `GreenNodeCache` then caches tokens
-and nodes using `TokenTextStorage` values, which include the synthetic numeric
-key but not the overlay text or namespace. Reusing the same cache across two
-snapshot replacements can deduplicate different replacement texts as the same
-green token/node storage.
-
-Observed validation: two replacements, one containing `"x"` and one containing
-`"y"`, produced equal `newSubtree.identity` values when they shared a cache. The
-text still rendered through each tree's overlay, but green identity claimed the
-subtrees were the same.
-
-Relevant code:
-
-- `Sources/CambiumBuilder/GreenTreeBuilder.swift`
-  - `ReplacementTokenRemapper.nextInterned`
-  - `ReplacementTokenRemapper.remap(token:replacementResolver:cache:)`
-  - `GreenNodeCache.makeToken(kind:textLength:text:)`
-  - `GreenNodeCache.makeNode(kind:children:)`
-
-Why it matters:
-
-- Breaks the central invariant that green identity means same immutable
-  structure and text.
-- Can make `ReplacementWitness.classify` and external identity trackers treat a
-  real text change as storage-preserving.
-- Can poison cache contents for later replacements.
-- Interacts with the `replacing(_:with: GreenNode, cache:)` no-op short-circuit
-  (`oldSubtree.identity == replacement.identity`): a future replacement whose
-  remapped subtree happens to collide on identity with an existing subtree is
-  silently treated as a no-op.
-
-Likely fix:
-
-- Do not cache overlay-synthetic token keys as if they were canonical text.
-- Remap snapshot dynamic text into the target cache's real interner namespace,
-  as `reuseSubtree` does, instead of using per-operation synthetic keys.
-- Alternatively, include a per-overlay namespace in token/cache equality, but
-  that weakens green sharing and complicates identity semantics.
-
-Acceptance tests:
-
-- Two snapshot replacements with different dynamic text and a shared cache
-  produce distinct green identities.
-- A repeated snapshot replacement with identical dynamic text can still dedupe
-  safely when the text is interned into a stable target namespace.
-
-### 3. Invalid UTF-8 Bytes Break Text-Length Invariants
+### 1. Invalid UTF-8 Bytes Break Text-Length Invariants
 
 **Severity:** High
 
@@ -163,7 +66,7 @@ Acceptance tests:
   exactly through `withTextUTF8`.
 - Rendered byte count and stored `textLength` remain consistent.
 
-### 4. Visible-Range Token Walking Leaks Zero-Length Tokens Into Unrelated Ranges
+### 2. Visible-Range Token Walking Leaks Zero-Length Tokens Into Unrelated Ranges
 
 **Severity:** High
 
@@ -204,7 +107,7 @@ Acceptance tests:
 - Missing token is returned for the intended boundary ranges, including any
   accepted empty-range semantics.
 
-### 5. `visitPreorder(.stop)` Does Not Stop Sibling Traversal
+### 3. `visitPreorder(.stop)` Does Not Stop Sibling Traversal
 
 **Severity:** Medium
 
@@ -239,7 +142,7 @@ Acceptance tests:
 - `visitPreorder` still respects `.skipChildren` as "do not descend, but keep
   walking siblings."
 
-### 6. Public Green Token Construction Can Violate Static-Text Invariants
+### 4. Public Green Token Construction Can Violate Static-Text Invariants
 
 **Severity:** Medium
 
@@ -279,7 +182,7 @@ Acceptance tests:
 - Public construction rejects `.staticText` for dynamic kinds unless the
   intended representation is explicitly "empty static text unavailable."
 
-### 7. `firstReusableNode` Aborts After First Matching Child Returns Nil
+### 5. `firstReusableNode` Aborts After First Matching Child Returns Nil
 
 **Severity:** Medium
 
@@ -315,7 +218,7 @@ Acceptance tests:
 - Two zero-length sibling nodes at the same offset, with the requested kind on
   the second, surface a reuse hit.
 
-### 8. Decoder Traps On Unknown `RawSyntaxKind` Values
+### 6. Decoder Traps On Unknown `RawSyntaxKind` Values
 
 **Severity:** Medium
 
@@ -354,43 +257,48 @@ Acceptance tests:
 - A snapshot whose raw-kind field is outside the language's enum decodes with a
   typed error rather than trapping.
 
-### 9. Snapshot-Replacement Resolver Loses `tokenKeyNamespace` Permanently
+### 7. Overlay-Fallback Replacement Resolver Loses `tokenKeyNamespace`
 
 **Severity:** Medium
 
-**Area:** `OverlayTokenResolver`, `SharedSyntaxTree.replacing(_:with: GreenTreeSnapshot, cache:)`
+**Area:** `OverlayTokenResolver`, the cross-namespace overlay fallback in
+`SharedSyntaxTree.replacing(_:with: ResolvedGreenNode, cache:)`
 
-After a snapshot replacement that contributes any dynamic token text, the
-result tree's resolver becomes an `OverlayTokenResolver` whose
-`tokenKeyNamespace` is `nil`. Subsequent `reuseSubtree` calls from that result
-tree fail the namespace check
-(`sourceNamespace === cacheStorage.interner.tokenKeyNamespace`) and pay the
-`.remapped` rebuild cost — forever.
+The cache-compatible replacement paths now snapshot the cache's interner for
+the result resolver, preserving `tokenKeyNamespace`. The remaining gap is the
+overlay fallback taken when neither the replacement nor the cache shares the
+target tree's namespace: that path returns an `OverlayTokenResolver` whose
+`tokenKeyNamespace` is `nil`, so subsequent `reuseSubtree` calls from the
+result tree fail the namespace check (`sourceNamespace ===
+cacheStorage.interner.tokenKeyNamespace`) and pay the `.remapped` rebuild
+cost — forever.
 
 Relevant code:
 
 - `Sources/CambiumBuilder/GreenTreeBuilder.swift`
   - `OverlayTokenResolver.tokenKeyNamespace`
-  - `SharedSyntaxTree.replacing(_:with: GreenTreeSnapshot, cache:)` (overlay
-    construction at the end of the function)
+  - `SharedSyntaxTree.replacing(_:with: ResolvedGreenNode, cache:)` (overlay
+    fallback branch at the bottom of the function)
   - `GreenTreeBuilder.reuseSubtree(_:)`
 
 Why it matters:
 
-- A long edit session that mixes snapshot replacements with incremental reparse
-  never recovers the fast-path. The "first edit pays remapping" caveat in the
-  codebase comments understates the lifetime of the cliff.
-- Hard to diagnose without comparing `SubtreeReuseOutcome` rates across parses.
+- A long edit session that lands in the overlay fallback never recovers the
+  fast-path even after a subsequent compatible-cache replacement, because the
+  tree carrying the nil-namespace overlay becomes the next operation's
+  `target`.
+- Hard to diagnose without comparing `SubtreeReuseOutcome` rates across
+  parses.
 
 Likely fix:
 
-- When the replacement's dynamic tokens are remapped through the destination
-  cache's interner (the `ReusedSubtreeTokenRemapper` style), preserve the
-  destination cache's namespace on the result resolver.
-- Alternatively, expose the destination cache's namespace on the overlay so the
-  namespace check can match.
+- Expose the *target tree's* namespace on the overlay (since overlay keys are
+  drawn above the target's existing keys, they live in the same namespace as
+  the base) so the namespace check can match.
+- Or merge the overlay's mappings into a fresh `TokenTextSnapshot` at
+  replacement time, which preserves namespace at the cost of a copy.
 
-### 10. Node-Cache Eviction Undercounts Hash-Bucket Entries
+### 8. Node-Cache Eviction Undercounts Hash-Bucket Entries
 
 **Severity:** Medium-Low
 
@@ -427,7 +335,7 @@ Likely fix:
 
 ## Priority 1: Performance Risks
 
-### 11. Green Cache Hits Still Allocate Candidate Nodes First
+### 9. Green Cache Hits Still Allocate Candidate Nodes First
 
 **Severity:** Major performance concern
 
@@ -467,7 +375,7 @@ Measurement target:
   confirm allocation count drops on cache hits.
 - Benchmark replacement in wide shallow nodes and deep narrow nodes.
 
-### 12. String Materialization Decodes And Reallocates Per Chunk
+### 10. String Materialization Decodes And Reallocates Per Chunk
 
 **Severity:** Major performance concern
 
@@ -506,7 +414,7 @@ Measurement target:
   same total byte count.
 - Track allocations and wall time before/after a byte-buffer sink.
 
-### 13. `withDescendant(atPath:)` Triggers O(childIndex) Per Step On First Realization
+### 11. `withDescendant(atPath:)` Triggers O(childIndex) Per Step On First Realization
 
 **Severity:** Performance concern (cold path)
 
@@ -535,7 +443,7 @@ Likely fix:
 - Thread `childStart` through the loop in `withDescendant(atPath:)`, matching
   the pattern used by sibling and child traversal helpers.
 
-### 14. Token Interners Allocate `[UInt8]` On Every Lookup
+### 12. Token Interners Allocate `[UInt8]` On Every Lookup
 
 **Severity:** Major performance concern (hot path)
 
@@ -564,7 +472,7 @@ Measurement target:
 - Allocation count per `intern` call drops on cache hits.
 - Steady-state interning throughput improves on token-dense input.
 
-### 15. `SharedTokenInterner.resolve` Locks The Shard On Every Read
+### 13. `SharedTokenInterner.resolve` Locks The Shard On Every Read
 
 **Severity:** Performance concern (concurrent reads)
 
@@ -591,7 +499,7 @@ Likely fix:
   lock-free.
 - Alternatively, expose a borrowed snapshot resolver for read-heavy passes.
 
-### 16. Slot Chunks Over-Provision For Token Children
+### 14. Slot Chunks Over-Provision For Token Children
 
 **Severity:** Memory performance concern
 
@@ -618,7 +526,7 @@ Likely fix:
   `GreenNodeStorage` for wide nodes). Adds one indirection per realization,
   saves memory proportional to token density.
 
-### 17. `GreenSnapshotEncoder.collect` Allocates Canonical Nodes Before Dedup Check
+### 15. `GreenSnapshotEncoder.collect` Allocates Canonical Nodes Before Dedup Check
 
 **Severity:** Performance concern (serialization path)
 
@@ -640,7 +548,7 @@ Likely fix:
 - Dedup via a key on `(rawKind, [childIDs])` *before* allocating the canonical
   node.
 
-### 18. `BinaryWriter.bytes` Doesn't Reserve Capacity
+### 16. `BinaryWriter.bytes` Doesn't Reserve Capacity
 
 **Severity:** Minor performance concern
 
@@ -663,7 +571,7 @@ Likely fix:
 - Call `bytes.reserveCapacity(estimatedSize)` once before the body of `encode`,
   with an estimate based on the known record/string counts.
 
-### 19. `RedArena.realizeChildNode` Slow Path Serializes On A Single Mutex
+### 17. `RedArena.realizeChildNode` Slow Path Serializes On A Single Mutex
 
 **Severity:** Performance concern (concurrent traversal)
 
@@ -686,7 +594,7 @@ Likely fix candidates:
 - Thread-local arena that periodically merges into shared state.
 - Benchmark first to confirm contention before changing the model.
 
-### 20. Recursive Traversal Risks Stack Overflow On Pathological Inputs
+### 18. Recursive Traversal Risks Stack Overflow On Pathological Inputs
 
 **Severity:** Robustness concern
 
