@@ -218,22 +218,22 @@ private extension SyntaxNodeCursor {
         invalidatingEdits edits: [TextEdit],
         _ body: (borrowing SyntaxNodeCursor<Lang>) throws -> R
     ) rethrows -> (value: R, hitBytes: TextSize)? {
-        let range = textRange
-        if range.start == offset && self.rawKind == rawKind && rangeIsReusable(range, through: edits) {
-            let length = range.length
-            return (try body(self), length)
-        }
-
         var result: (value: R, hitBytes: TextSize)?
-        try forEachChild { child in
-            if result == nil, child.textRange.start <= offset, offset <= child.textRange.end {
-                result = try child.firstReusableNode(
-                    startingAt: offset,
-                    rawKind: rawKind,
-                    invalidatingEdits: edits,
-                    body
-                )
+        _ = try visitPreorder { candidate in
+            let range = candidate.textRange
+            guard range.start <= offset, offset <= range.end else {
+                return .skipChildren
             }
+
+            if range.start == offset
+                && candidate.rawKind == rawKind
+                && rangeIsReusable(range, through: edits)
+            {
+                result = (try body(candidate), range.length)
+                return .stop
+            }
+
+            return .continue
         }
         return result
     }

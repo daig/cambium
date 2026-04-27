@@ -562,6 +562,31 @@ import Testing
     #expect(result == TextRange(start: 0, end: 2))
 }
 
+@Test func reuseOracleContinuesPastNilBoundaryCandidate() throws {
+    let previous = try makeZeroLengthBoundaryCandidateTree().share()
+    let oracle = ReuseOracle<TestLanguage>(previousTree: previous)
+
+    let result: [UInt32]? = oracle.withReusableNode(startingAt: .zero, kind: .list) { node in
+        node.childIndexPath()
+    }
+
+    #expect(result == [1])
+}
+
+@Test func reuseOracleOffersFirstBoundaryHitOnlyOnce() throws {
+    let previous = try makeRepeatedZeroLengthListTree().share()
+    let oracle = ReuseOracle<TestLanguage>(previousTree: previous)
+    var callbackCount = 0
+
+    let result: [UInt32]? = oracle.withReusableNode(startingAt: .zero, kind: .list) { node in
+        callbackCount += 1
+        return node.childIndexPath()
+    }
+
+    #expect(result == [0])
+    #expect(callbackCount == 1)
+}
+
 private func makeTwoListRoot() throws -> SyntaxTree<TestLanguage> {
     var builder = GreenTreeBuilder<TestLanguage>()
     builder.startNode(.root)
@@ -571,6 +596,24 @@ private func makeTwoListRoot() throws -> SyntaxTree<TestLanguage> {
     builder.startNode(.list)
     try builder.token(.identifier, text: "old")
     try builder.finishNode()
+    try builder.finishNode()
+    return try builder.finish().snapshot.makeSyntaxTree()
+}
+
+private func makeZeroLengthBoundaryCandidateTree() throws -> SyntaxTree<TestLanguage> {
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.root)
+    try builder.missingNode(.missing)
+    try builder.missingNode(.list)
+    try builder.finishNode()
+    return try builder.finish().snapshot.makeSyntaxTree()
+}
+
+private func makeRepeatedZeroLengthListTree() throws -> SyntaxTree<TestLanguage> {
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.root)
+    try builder.missingNode(.list)
+    try builder.missingNode(.list)
     try builder.finishNode()
     return try builder.finish().snapshot.makeSyntaxTree()
 }
