@@ -9,65 +9,19 @@ performance risks that should be triaged before or shortly after v1.
 
 ## Validation Notes
 
-- The original audit's confirmed findings — wrong-resolver replacement,
-  snapshot-replacement identity collisions, zero-length tokens leaking outside
-  their query range, invalid UTF-8 breaking text-length invariants,
-  `visitPreorder(.stop)` sibling traversal, and inconsistent public
-  `GreenToken` construction — have since been fixed and removed from this
-  list.
+- The following findings have been fixed and removed from this list:
+  wrong-resolver replacement, snapshot-replacement identity collisions,
+  zero-length tokens leaking outside their query range, invalid UTF-8
+  breaking text-length invariants, `visitPreorder(.stop)` sibling
+  traversal, inconsistent public `GreenToken` construction, and
+  `firstReusableNode` boundary search lacking early exit and coverage.
 - Remaining findings here are based on code inspection and traced behaviour
   rather than executed tests; treat them as high-confidence but unvalidated
   until tests land.
 
 ## Priority 0: Correctness Bugs
 
-### 1. `firstReusableNode` Boundary Candidate Search Needs Coverage And Early Exit
-
-**Severity:** Medium-Low
-
-**Area:** `SyntaxNodeCursor.firstReusableNode` (incremental reuse oracle)
-
-`forEachChild` visits node children in order. The boundary condition
-`child.textRange.start <= offset && offset <= child.textRange.end` admits
-multiple children when their ranges share a boundary — for example, two
-zero-length placeholder nodes at the same offset, or a zero-length node
-abutting a non-empty sibling.
-
-The current implementation already continues after a matching child returns
-nil, because `result` remains nil and later candidate siblings are still
-considered. The remaining gap is that this boundary behavior is not covered by
-a regression test, and once a result is found the `forEachChild` helper still
-walks later node siblings even though the answer is known.
-
-Relevant code:
-
-- `Sources/CambiumIncremental/IncrementalParsing.swift`
-  - `SyntaxNodeCursor.firstReusableNode(startingAt:rawKind:invalidatingEdits:_:)`
-
-Why it matters:
-
-- Error-recovery placeholders create exactly this shape: a missing-node and a
-  real node sharing an offset.
-- Without coverage, a future refactor could reintroduce the original reuse
-  miss, visible only as reuse-rate degradation.
-- After a hit, the current implementation can still realize and scan
-  unnecessary later siblings because `forEachChild` has no early-exit contract.
-
-Likely fix:
-
-- Add regression coverage for multiple boundary candidates where the first
-  returns nil and a later candidate matches.
-- Optionally replace `forEachChild` with a local child loop that returns
-  immediately once recursion produces a non-nil result.
-
-Acceptance tests:
-
-- Two zero-length sibling nodes at the same offset, with the requested kind on
-  the second, surface a reuse hit.
-- A later matching sibling after an earlier nil boundary candidate is offered
-  exactly once.
-
-### 2. Decoder Traps On Unknown `RawSyntaxKind` Values
+### 1. Decoder Traps On Unknown `RawSyntaxKind` Values
 
 **Severity:** Medium
 
@@ -106,7 +60,7 @@ Acceptance tests:
 - A snapshot whose raw-kind field is outside the language's enum decodes with a
   typed error rather than trapping.
 
-### 3. Overlay-Fallback Replacement Resolver Loses `tokenKeyNamespace`
+### 2. Overlay-Fallback Replacement Resolver Loses `tokenKeyNamespace`
 
 **Severity:** Medium
 
@@ -147,7 +101,7 @@ Likely fix:
 - Or merge the overlay's mappings into a fresh `TokenTextSnapshot` at
   replacement time, which preserves namespace at the cost of a copy.
 
-### 4. Node-Cache Eviction Undercounts Hash-Bucket Entries
+### 3. Node-Cache Eviction Undercounts Hash-Bucket Entries
 
 **Severity:** Medium-Low
 
@@ -184,7 +138,7 @@ Likely fix:
 
 ## Priority 1: Performance Risks
 
-### 5. Green Cache Hits Still Allocate Candidate Nodes First
+### 4. Green Cache Hits Still Allocate Candidate Nodes First
 
 **Severity:** Major performance concern
 
@@ -224,7 +178,7 @@ Measurement target:
   confirm allocation count drops on cache hits.
 - Benchmark replacement in wide shallow nodes and deep narrow nodes.
 
-### 6. String Materialization Decodes And Reallocates Per Chunk
+### 5. String Materialization Decodes And Reallocates Per Chunk
 
 **Severity:** Major performance concern
 
@@ -263,7 +217,7 @@ Measurement target:
   same total byte count.
 - Track allocations and wall time before/after a byte-buffer sink.
 
-### 7. `withDescendant(atPath:)` Triggers O(childIndex) Per Step On First Realization
+### 6. `withDescendant(atPath:)` Triggers O(childIndex) Per Step On First Realization
 
 **Severity:** Performance concern (cold path)
 
@@ -292,7 +246,7 @@ Likely fix:
 - Thread `childStart` through the loop in `withDescendant(atPath:)`, matching
   the pattern used by sibling and child traversal helpers.
 
-### 8. Token Interners Allocate `[UInt8]` On Every Lookup
+### 7. Token Interners Allocate `[UInt8]` On Every Lookup
 
 **Severity:** Major performance concern (hot path)
 
@@ -321,7 +275,7 @@ Measurement target:
 - Allocation count per `intern` call drops on cache hits.
 - Steady-state interning throughput improves on token-dense input.
 
-### 9. `SharedTokenInterner.resolve` Locks The Shard On Every Read
+### 8. `SharedTokenInterner.resolve` Locks The Shard On Every Read
 
 **Severity:** Performance concern (concurrent reads)
 
@@ -348,7 +302,7 @@ Likely fix:
   lock-free.
 - Alternatively, expose a borrowed snapshot resolver for read-heavy passes.
 
-### 10. Slot Chunks Over-Provision For Token Children
+### 9. Slot Chunks Over-Provision For Token Children
 
 **Severity:** Memory performance concern
 
@@ -375,7 +329,7 @@ Likely fix:
   `GreenNodeStorage` for wide nodes). Adds one indirection per realization,
   saves memory proportional to token density.
 
-### 11. `GreenSnapshotEncoder.collect` Allocates Canonical Nodes Before Dedup Check
+### 10. `GreenSnapshotEncoder.collect` Allocates Canonical Nodes Before Dedup Check
 
 **Severity:** Performance concern (serialization path)
 
@@ -397,7 +351,7 @@ Likely fix:
 - Dedup via a key on `(rawKind, [childIDs])` *before* allocating the canonical
   node.
 
-### 12. `BinaryWriter.bytes` Doesn't Reserve Capacity
+### 11. `BinaryWriter.bytes` Doesn't Reserve Capacity
 
 **Severity:** Minor performance concern
 
@@ -420,7 +374,7 @@ Likely fix:
 - Call `bytes.reserveCapacity(estimatedSize)` once before the body of `encode`,
   with an estimate based on the known record/string counts.
 
-### 13. `RedArena.realizeChildNode` Slow Path Serializes On A Single Mutex
+### 12. `RedArena.realizeChildNode` Slow Path Serializes On A Single Mutex
 
 **Severity:** Performance concern (concurrent traversal)
 
@@ -443,7 +397,7 @@ Likely fix candidates:
 - Thread-local arena that periodically merges into shared state.
 - Benchmark first to confirm contention before changing the model.
 
-### 14. Recursive Traversal Risks Stack Overflow On Pathological Inputs
+### 13. Recursive Traversal Risks Stack Overflow On Pathological Inputs
 
 **Severity:** Robustness concern
 
