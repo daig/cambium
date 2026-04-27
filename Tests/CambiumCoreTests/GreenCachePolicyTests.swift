@@ -4,10 +4,9 @@ import Testing
 
 private let cacheIdentifierKind = RawSyntaxKind(TestKind.identifier.rawValue)
 private let cacheListKind = RawSyntaxKind(TestKind.list.rawValue)
-private let cachePlusKind = RawSyntaxKind(TestKind.plus.rawValue)
 
-private func plusToken() -> GreenToken<TestLanguage> {
-    GreenToken(kind: cachePlusKind, textLength: 1, text: .staticText)
+private func plusToken() throws -> GreenToken<TestLanguage> {
+    try GreenToken<TestLanguage>.staticToken(kind: .plus)
 }
 
 @Test func parseSessionAndSharedPoliciesRejectNonPositiveEntryCounts() async {
@@ -35,7 +34,7 @@ private func plusToken() -> GreenToken<TestLanguage> {
 
 @Test func smallNodesDeduplicateAndPreserveGreenIdentity() throws {
     var cache = GreenNodeCache<TestLanguage>(policy: .parseSession(maxEntries: 2))
-    let token = plusToken()
+    let token = try plusToken()
 
     let first = try cache.makeNode(kind: cacheListKind, children: [.token(token), .token(token), .token(token)])
     let second = try cache.makeNode(kind: cacheListKind, children: [.token(token), .token(token), .token(token)])
@@ -50,7 +49,7 @@ private func plusToken() -> GreenToken<TestLanguage> {
 
 @Test func wideNodesBypassCacheAndDoNotPreserveGreenIdentity() throws {
     var cache = GreenNodeCache<TestLanguage>(policy: .parseSession(maxEntries: 8))
-    let token = plusToken()
+    let token = try plusToken()
     let children: [GreenElement<TestLanguage>] = [
         .token(token),
         .token(token),
@@ -104,7 +103,7 @@ private func plusToken() -> GreenToken<TestLanguage> {
 
 @Test func disabledPolicyBypassesNodeCache() throws {
     var cache = GreenNodeCache<TestLanguage>(policy: .disabled)
-    let token = plusToken()
+    let token = try plusToken()
 
     // A 3-child node would be eligible under any non-disabled policy. Under
     // `.disabled` it bypasses regardless of size.

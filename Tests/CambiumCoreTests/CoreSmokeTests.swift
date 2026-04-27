@@ -249,8 +249,12 @@ private func describeElementWalkEvent(_ event: borrowing SyntaxElementWalkEvent<
     }
 }
 
-@Test func greenElementExposesKindAndLength() {
-    let token = GreenToken<TestLanguage>(kind: .identifier, textLength: 3, text: .interned(TokenKey(0)))
+@Test func greenElementExposesKindAndLength() throws {
+    let token = try GreenToken<TestLanguage>.internedToken(
+        kind: .identifier,
+        textLength: 3,
+        key: TokenKey(0)
+    )
     let element = GreenElement<TestLanguage>.token(token)
 
     #expect(element.rawKind == RawSyntaxKind(TestKind.identifier.rawValue))

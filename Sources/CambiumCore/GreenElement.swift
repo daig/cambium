@@ -164,6 +164,20 @@ public enum GreenStorageError: Error, Sendable, Equatable {
     case staticTextLengthMismatch(expected: TextSize, actual: TextSize)
 }
 
+public enum GreenTokenError: Error, Sendable, Equatable {
+    /// `GreenToken.staticToken(kind:)` was called with a kind whose
+    /// `Lang.staticText(for:)` is nil. Use `missingToken(kind:)` for an
+    /// "empty placeholder" token of any kind, or `internedToken` /
+    /// `largeToken` for dynamic text.
+    case staticTextUnavailable(RawSyntaxKind)
+
+    /// `GreenToken.internedToken(kind:textLength:key:)` or
+    /// `largeToken(kind:textLength:id:)` was called with a kind that has
+    /// non-nil `Lang.staticText(for:)`. Use `staticToken(kind:)` for static
+    /// kinds.
+    case staticKindRequiresDynamicToken(RawSyntaxKind)
+}
+
 internal enum GreenHash {
     static let offset: UInt64 = 0xcbf29ce484222325
     static let prime: UInt64 = 0x100000001b3
@@ -223,11 +237,17 @@ final class GreenTokenStorage<Lang: SyntaxLanguage> {
 public struct GreenToken<Lang: SyntaxLanguage>: @unchecked Sendable, Hashable {
     internal let storage: GreenTokenStorage<Lang>
 
-    public init(kind: RawSyntaxKind, textLength: TextSize, text: TokenTextStorage = .staticText) {
+    /// Unchecked construction. `package`-visible so trusted call sites in
+    /// other modules of this package (cache `makeToken`, replacement
+    /// remappers, encoder canonicalization, snapshot decoder) can build
+    /// tokens from already-validated inputs without paying re-validation
+    /// overhead. Public callers go through the per-variant factories
+    /// (`staticToken`, `missingToken`, `internedToken`, `largeToken`).
+    package init(kind: RawSyntaxKind, textLength: TextSize, text: TokenTextStorage = .staticText) {
         self.storage = GreenTokenStorage(rawKind: kind, textLength: textLength, text: text)
     }
 
-    public init(kind: Lang.Kind, textLength: TextSize, text: TokenTextStorage = .staticText) {
+    package init(kind: Lang.Kind, textLength: TextSize, text: TokenTextStorage = .staticText) {
         self.init(kind: Lang.rawKind(for: kind), textLength: textLength, text: text)
     }
 
@@ -312,6 +332,66 @@ public struct GreenToken<Lang: SyntaxLanguage>: @unchecked Sendable, Hashable {
         hasher.combine(rawKind)
         hasher.combine(textLength)
         hasher.combine(textStorage)
+    }
+}
+
+public extension GreenToken {
+    /// Construct a static-text token. `textLength` is derived from
+    /// `Lang.staticText(for: kind)`. Throws
+    /// `GreenTokenError.staticTextUnavailable` when the kind has no static
+    /// text — use `missingToken(kind:)` for an empty placeholder, or
+    /// `internedToken` / `largeToken` for dynamic-text kinds.
+    static func staticToken(kind: Lang.Kind) throws -> GreenToken<Lang> {
+        guard let text = Lang.staticText(for: kind) else {
+            throw GreenTokenError.staticTextUnavailable(Lang.rawKind(for: kind))
+        }
+        var byteCount = 0
+        text.withUTF8Buffer { byteCount = $0.count }
+        let length: TextSize
+        do {
+            length = try TextSize(exactly: byteCount)
+        } catch {
+            throw GreenStorageError.textLengthOverflow
+        }
+        return GreenToken(kind: kind, textLength: length, text: .staticText)
+    }
+
+    /// Construct a missing-text token. Renders as empty bytes regardless of
+    /// `Lang.staticText(for: kind)`; `textLength` is always zero. Used for
+    /// error-recovery placeholders for kinds that would normally have
+    /// static or dynamic text.
+    static func missingToken(kind: Lang.Kind) -> GreenToken<Lang> {
+        GreenToken(kind: kind, textLength: .zero, text: .missing)
+    }
+
+    /// Construct an interned-text token. Throws
+    /// `GreenTokenError.staticKindRequiresDynamicToken` when the kind has
+    /// non-nil `Lang.staticText(for:)` — use `staticToken(kind:)` for that
+    /// case. The caller is responsible for `textLength` matching the
+    /// resolver's bytes for `key`; mismatch is caught at serialization
+    /// time, not at construction.
+    static func internedToken(
+        kind: Lang.Kind,
+        textLength: TextSize,
+        key: TokenKey
+    ) throws -> GreenToken<Lang> {
+        if Lang.staticText(for: kind) != nil {
+            throw GreenTokenError.staticKindRequiresDynamicToken(Lang.rawKind(for: kind))
+        }
+        return GreenToken(kind: kind, textLength: textLength, text: .interned(key))
+    }
+
+    /// Construct a large-text token. Same kind/static-text validation as
+    /// `internedToken`.
+    static func largeToken(
+        kind: Lang.Kind,
+        textLength: TextSize,
+        id: LargeTokenTextID
+    ) throws -> GreenToken<Lang> {
+        if Lang.staticText(for: kind) != nil {
+            throw GreenTokenError.staticKindRequiresDynamicToken(Lang.rawKind(for: kind))
+        }
+        return GreenToken(kind: kind, textLength: textLength, text: .ownedLargeText(id))
     }
 }
 
