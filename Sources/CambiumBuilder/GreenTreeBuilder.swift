@@ -71,18 +71,32 @@ public struct LocalTokenInterner: ~Copyable {
     public mutating func intern(_ text: String) -> TokenKey {
         var copy = text
         return copy.withUTF8 { bytes in
-            intern(bytes)
+            internValidated(text, bytes: bytes)
         }
     }
 
-    public mutating func intern(_ bytes: UnsafeBufferPointer<UInt8>) -> TokenKey {
+    public mutating func intern(_ bytes: UnsafeBufferPointer<UInt8>) throws -> TokenKey {
         let keyBytes = Array(bytes)
+        if let key = storage.keysByText[keyBytes] {
+            return key
+        }
+        guard let text = String(validating: keyBytes, as: UTF8.self) else {
+            throw TokenTextError.invalidUTF8
+        }
+        return internValidated(text, keyBytes: keyBytes)
+    }
+
+    private mutating func internValidated(_ text: String, bytes: UnsafeBufferPointer<UInt8>) -> TokenKey {
+        internValidated(text, keyBytes: Array(bytes))
+    }
+
+    private mutating func internValidated(_ text: String, keyBytes: [UInt8]) -> TokenKey {
         if let key = storage.keysByText[keyBytes] {
             return key
         }
         let key = TokenKey(UInt32(storage.textByKey.count))
         storage.keysByText[keyBytes] = key
-        storage.textByKey.append(String(decoding: bytes, as: UTF8.self))
+        storage.textByKey.append(text)
         return key
     }
 
@@ -161,16 +175,50 @@ public final class SharedTokenInterner: TokenResolver, @unchecked Sendable {
     public func intern(_ text: String) -> TokenKey {
         var copy = text
         return copy.withUTF8 { bytes in
-            intern(bytes)
+            internValidated(text, bytes: bytes)
         }
     }
 
-    public func intern(_ bytes: UnsafeBufferPointer<UInt8>) -> TokenKey {
+    /// Splits the lookup and the insert into two shard-mutex acquisitions so
+    /// UTF-8 validation does not run under the lock. Validation is O(n) over
+    /// `bytes`; holding the shard mutex through it would serialize every
+    /// other thread that hashes to the same shard for the duration of a long
+    /// token's validation. The two-acquisition shape keeps both critical
+    /// sections short (a single dictionary read on the fast path, a
+    /// re-checked insert on the slow path) at the cost of one extra
+    /// acquisition per miss. The slow path's re-check closes the TOCTOU
+    /// window between the two acquisitions: if another thread inserted the
+    /// same `keyBytes` while we were validating, we return its key.
+    public func intern(_ bytes: UnsafeBufferPointer<UInt8>) throws -> TokenKey {
         let keyBytes = Array(bytes)
         let shardIndex = SharedTokenInternerKeyLayout.shardIndex(
             forHash: keyBytes.hashValue,
             shardCount: shards.count
         )
+        if let key = shards[shardIndex].mutex.withLock({ shard in
+            shard.keysByText[keyBytes]
+        }) {
+            return key
+        }
+        guard let text = String(validating: keyBytes, as: UTF8.self) else {
+            throw TokenTextError.invalidUTF8
+        }
+        return internValidated(text, keyBytes: keyBytes, shardIndex: shardIndex)
+    }
+
+    private func internValidated(_ text: String, bytes: UnsafeBufferPointer<UInt8>) -> TokenKey {
+        internValidated(text, keyBytes: Array(bytes))
+    }
+
+    private func internValidated(_ text: String, keyBytes: [UInt8]) -> TokenKey {
+        let shardIndex = SharedTokenInternerKeyLayout.shardIndex(
+            forHash: keyBytes.hashValue,
+            shardCount: shards.count
+        )
+        return internValidated(text, keyBytes: keyBytes, shardIndex: shardIndex)
+    }
+
+    private func internValidated(_ text: String, keyBytes: [UInt8], shardIndex: Int) -> TokenKey {
         return shards[shardIndex].mutex.withLock { shard in
             if let key = shard.keysByText[keyBytes] {
                 return key
@@ -184,7 +232,7 @@ public final class SharedTokenInterner: TokenResolver, @unchecked Sendable {
                 )
             }
             shard.keysByText[keyBytes] = key
-            shard.textByKey.append(String(decoding: bytes, as: UTF8.self))
+            shard.textByKey.append(text)
             return key
         }
     }
@@ -368,9 +416,9 @@ public struct GreenNodeCache<Lang: SyntaxLanguage>: ~Copyable {
         return interner.intern(text)
     }
 
-    public mutating func intern(_ bytes: UnsafeBufferPointer<UInt8>) -> TokenKey {
+    public mutating func intern(_ bytes: UnsafeBufferPointer<UInt8>) throws -> TokenKey {
         var interner = LocalTokenInterner(storage: storage.interner)
-        return interner.intern(bytes)
+        return try interner.intern(bytes)
     }
 
     public mutating func storeLargeText(_ text: String) -> LargeTokenTextID {
@@ -645,7 +693,7 @@ struct CacheReplacementTokenRemapper<Lang: SyntaxLanguage> {
                     cache: &cache
                 )))
             case .token(let token):
-                children.append(.token(remap(
+                children.append(.token(try remap(
                     token: token,
                     replacementResolver: replacementResolver,
                     cache: &cache
@@ -659,7 +707,7 @@ struct CacheReplacementTokenRemapper<Lang: SyntaxLanguage> {
         token: GreenToken<Lang>,
         replacementResolver: any TokenResolver,
         cache: inout GreenNodeCache<Lang>
-    ) -> GreenToken<Lang> {
+    ) throws -> GreenToken<Lang> {
         let text: TokenTextStorage
         switch token.textStorage {
         case .staticText:
@@ -667,13 +715,16 @@ struct CacheReplacementTokenRemapper<Lang: SyntaxLanguage> {
         case .missing:
             text = .missing
         case .interned(let key):
-            let mapped = internedMap[key] ?? {
-                let newKey = replacementResolver.withUTF8(key) { bytes in
-                    cache.intern(bytes)
+            let mapped: TokenKey
+            if let existing = internedMap[key] {
+                mapped = existing
+            } else {
+                let newKey = try replacementResolver.withUTF8(key) { bytes in
+                    try cache.intern(bytes)
                 }
                 internedMap[key] = newKey
-                return newKey
-            }()
+                mapped = newKey
+            }
             text = .interned(mapped)
         case .ownedLargeText(let id):
             let mapped = largeMap[id] ?? {
@@ -842,7 +893,7 @@ struct ReusedSubtreeTokenRemapper<Lang: SyntaxLanguage> {
                     cache: &cache
                 )))
             case .token(let token):
-                children.append(.token(remap(
+                children.append(.token(try remap(
                     token: token,
                     sourceResolver: sourceResolver,
                     cache: &cache
@@ -856,7 +907,7 @@ struct ReusedSubtreeTokenRemapper<Lang: SyntaxLanguage> {
         token: GreenToken<Lang>,
         sourceResolver: any TokenResolver,
         cache: inout GreenNodeCache<Lang>
-    ) -> GreenToken<Lang> {
+    ) throws -> GreenToken<Lang> {
         let text: TokenTextStorage
         switch token.textStorage {
         case .staticText:
@@ -864,13 +915,16 @@ struct ReusedSubtreeTokenRemapper<Lang: SyntaxLanguage> {
         case .missing:
             text = .missing
         case .interned(let key):
-            let mapped = internedMap[key] ?? {
-                let newKey = sourceResolver.withUTF8(key) { bytes in
-                    cache.intern(bytes)
+            let mapped: TokenKey
+            if let existing = internedMap[key] {
+                mapped = existing
+            } else {
+                let newKey = try sourceResolver.withUTF8(key) { bytes in
+                    try cache.intern(bytes)
                 }
                 internedMap[key] = newKey
-                return newKey
-            }()
+                mapped = newKey
+            }
             text = .interned(mapped)
         case .ownedLargeText(let id):
             let mapped = largeMap[id] ?? {
@@ -941,7 +995,7 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
             throw GreenTreeBuilderError.staticKindRequiresStaticToken(Lang.rawKind(for: kind))
         }
         var interner = LocalTokenInterner(storage: cacheStorage.interner)
-        let key = interner.intern(bytes)
+        let key = try interner.intern(bytes)
         let length = try TextSize(exactly: bytes.count)
         var cache = GreenNodeCache<Lang>(storage: cacheStorage)
         children.append(.token(cache.makeToken(

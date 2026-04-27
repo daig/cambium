@@ -37,6 +37,10 @@ public struct LargeTokenTextID: RawRepresentable, Sendable, Hashable, Comparable
     }
 }
 
+public enum TokenTextError: Error, Sendable, Equatable {
+    case invalidUTF8
+}
+
 /// Identity of a token-key namespace.
 ///
 /// `TokenKey` and `LargeTokenTextID` values are only meaningful inside the
