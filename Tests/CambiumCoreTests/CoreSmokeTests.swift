@@ -412,6 +412,89 @@ private func describeElementWalkEvent(_ event: borrowing SyntaxElementWalkEvent<
     #expect(childKind == .list)
 }
 
+@Test func builderCheckpointStartNodeRejectsDeeperOpenParent() throws {
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.root)
+    let checkpoint = builder.checkpoint()
+    builder.startNode(.list)
+    try builder.token(.identifier, text: "nested")
+
+    #expect(throws: GreenTreeBuilderError.invalidCheckpoint) {
+        try builder.startNode(at: checkpoint, .list)
+    }
+}
+
+@Test func builderCheckpointStartNodeAllowsReturnedParentContext() throws {
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.root)
+    let checkpoint = builder.checkpoint()
+    builder.startNode(.list)
+    try builder.token(.identifier, text: "nested")
+    try builder.finishNode()
+
+    try builder.startNode(at: checkpoint, .list)
+    try builder.finishNode()
+    try builder.finishNode()
+    let tree = try builder.finish().snapshot.makeSyntaxTree()
+
+    #expect(tree.withRoot { $0.makeString() } == "nested")
+}
+
+@Test func builderCheckpointStartNodeRejectsCheckpointFromAnotherBuilder() throws {
+    var first = GreenTreeBuilder<TestLanguage>()
+    first.startNode(.root)
+    let checkpoint = first.checkpoint()
+
+    var second = GreenTreeBuilder<TestLanguage>()
+    second.startNode(.root)
+
+    #expect(throws: GreenTreeBuilderError.invalidCheckpoint) {
+        try second.startNode(at: checkpoint, .list)
+    }
+}
+
+@Test func builderCheckpointStartNodeRejectsStaleSameDepthParent() throws {
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.root)
+    builder.startNode(.list)
+    let checkpoint = builder.checkpoint()
+    try builder.token(.identifier, text: "first")
+    try builder.finishNode()
+    builder.startNode(.list)
+
+    #expect(throws: GreenTreeBuilderError.invalidCheckpoint) {
+        try builder.startNode(at: checkpoint, .list)
+    }
+}
+
+@Test func builderCheckpointRevertAllowsDeeperOpenParent() throws {
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.root)
+    let checkpoint = builder.checkpoint()
+    builder.startNode(.list)
+    try builder.token(.identifier, text: "discard")
+
+    try builder.revert(to: checkpoint)
+    try builder.token(.identifier, text: "keep")
+    try builder.finishNode()
+    let tree = try builder.finish().snapshot.makeSyntaxTree()
+
+    #expect(tree.withRoot { $0.makeString() } == "keep")
+}
+
+@Test func builderCheckpointRevertRejectsCheckpointFromAnotherBuilder() throws {
+    var first = GreenTreeBuilder<TestLanguage>()
+    first.startNode(.root)
+    let checkpoint = first.checkpoint()
+
+    var second = GreenTreeBuilder<TestLanguage>()
+    second.startNode(.root)
+
+    #expect(throws: GreenTreeBuilderError.invalidCheckpoint) {
+        try second.revert(to: checkpoint)
+    }
+}
+
 @Test func cacheDeduplicatesEqualGreenNodesAfterStructuralEquality() throws {
     var cache = GreenNodeCache<TestLanguage>()
     let token = cache.makeToken(kind: RawSyntaxKind(TestKind.plus.rawValue), textLength: 1, text: .staticText)

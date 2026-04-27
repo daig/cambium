@@ -15,10 +15,14 @@ performance risks that should be triaged before or shortly after v1.
   breaking text-length invariants, `visitPreorder(.stop)` sibling
   traversal, inconsistent public `GreenToken` construction,
   `firstReusableNode` boundary search lacking early exit and coverage,
-  and the snapshot decoder trapping on unknown raw kinds.
+  the snapshot decoder trapping on unknown raw kinds, and
+  `BuilderCheckpoint.startNode(at:)` accepting cross-depth or stale
+  checkpoints.
 - The overlay-fallback replacement namespace issue has been reclassified from
   a correctness bug to intentional cache-lineage design debt. See the
   deferred section below.
+- The node-cache eviction count issue is cache resource-accounting debt, not
+  functional tree correctness. It is tracked with the performance/cache items.
 - Remaining findings here are based on code inspection and traced behaviour
   rather than executed tests; treat them as high-confidence but unvalidated
   until tests land.
@@ -71,9 +75,13 @@ Deferred direction:
 
 ## Priority 0: Correctness Bugs
 
-### 1. Node-Cache Eviction Undercounts Hash-Bucket Entries
+No known unresolved v1 functional correctness bugs remain in this audit.
 
-**Severity:** Medium-Low
+## Priority 1: Performance Risks
+
+### 2. Node-Cache Eviction Tracks Hash Buckets Instead Of Entries
+
+**Severity:** Cache resource-accounting concern
 
 **Area:** `GreenNodeCacheStorage`
 
@@ -85,19 +93,17 @@ then triggers on `tokenCache.count + nodeCache.count` (buckets, not entries)
 and evicts via `nodeCache.removeValue(forKey:)`, which removes the *whole
 bucket* but only consumes one queue slot.
 
+This does not affect tree correctness: cache misses, hits, and evictions still
+return structurally correct green nodes. The issue is that `maxEntries` is not
+a strict entry bound under hash collisions, and `evictionCount` under-reports
+the number of nodes removed when an entire bucket is evicted.
+
 Relevant code:
 
 - `Sources/CambiumBuilder/GreenTreeBuilder.swift`
   - `GreenNodeCacheStorage.recordNodeInsertion(for:)`
   - `GreenNodeCacheStorage.trimIfNeeded()`
   - `GreenNodeCache.makeNode(kind:children:)`
-
-Why it matters:
-
-- The size metric is buckets, not entries: with hash collisions the cache can
-  exceed `maxEntries`. Realistic input rarely produces degenerate buckets, but
-  `maxEntries` is no longer the upper bound the docs imply.
-- Eviction count under-reports the number of nodes actually freed.
 
 Likely fix:
 
@@ -106,9 +112,7 @@ Likely fix:
 - Enqueue an eviction-queue entry on each append into a bucket, not just on
   bucket creation.
 
-## Priority 1: Performance Risks
-
-### 2. Green Cache Hits Still Allocate Candidate Nodes First
+### 3. Green Cache Hits Still Allocate Candidate Nodes First
 
 **Severity:** Major performance concern
 
@@ -148,7 +152,7 @@ Measurement target:
   confirm allocation count drops on cache hits.
 - Benchmark replacement in wide shallow nodes and deep narrow nodes.
 
-### 3. String Materialization Decodes And Reallocates Per Chunk
+### 4. String Materialization Decodes And Reallocates Per Chunk
 
 **Severity:** Major performance concern
 
@@ -187,17 +191,18 @@ Measurement target:
   same total byte count.
 - Track allocations and wall time before/after a byte-buffer sink.
 
-### 4. `withDescendant(atPath:)` Triggers O(childIndex) Per Step On First Realization
+### 5. Path-Based Descendant Lookup Needs Stored Child Offsets For O(depth)
 
-**Severity:** Performance concern (cold path)
+**Severity:** Storage-layout performance debt (cold path)
 
 **Area:** `SyntaxNodeCursor.withDescendant(atPath:)`, `RedArena.realizeChildNode`
 
-`realizeChildNode` is called without `childStartOffset`, so it falls back to
-`parent.green.childStartOffset(at: childIndex)`, which iterates `0..<childIndex`
-summing `textLength`s. Other realization sites thread the cumulative offset
-through, avoiding this. For a path of length D into a tree where each ancestor
-has W children, first-time descent is O(D·W) instead of O(D).
+`withDescendant(atPath:)` is correct today: when it realizes a raw child index,
+`realizeChildNode` falls back to `parent.green.childStartOffset(at:)`, which
+sums the earlier siblings' `textLength`s and produces the right byte offset.
+The issue is cost, not semantics. On a cold path, that fallback runs inside the
+arena mutex and costs O(childIndex) at each step. For a path of depth D through
+wide ancestors, first-time descent is O(sum(childIndexes)) rather than O(D).
 
 `withDescendant(atPath:)` is the documented way to follow stored paths from
 `childIndexPath()`, including cross-tree path translation through
@@ -211,12 +216,16 @@ Relevant code:
 - `Sources/CambiumCore/GreenElement.swift`
   - `GreenNode.childStartOffset(at:)`
 
-Likely fix:
+Deferred direction:
 
-- Thread `childStart` through the loop in `withDescendant(atPath:)`, matching
-  the pattern used by sibling and child traversal helpers.
+- A narrow local patch can move the sibling-length sum out of the arena lock,
+  but it cannot remove the O(childIndex) work because the path only contains a
+  raw child index.
+- A true fix needs green storage to expose child-start offsets, probably as
+  prefix-offset side storage for nodes where the memory/performance tradeoff is
+  worthwhile. Defer this to the broader green-storage/cache redesign.
 
-### 5. Token Interners Allocate `[UInt8]` On Every Lookup
+### 6. Token Interners Allocate `[UInt8]` On Every Lookup
 
 **Severity:** Major performance concern (hot path)
 
@@ -245,7 +254,7 @@ Measurement target:
 - Allocation count per `intern` call drops on cache hits.
 - Steady-state interning throughput improves on token-dense input.
 
-### 6. `SharedTokenInterner.resolve` Locks The Shard On Every Read
+### 7. `SharedTokenInterner.resolve` Locks The Shard On Every Read
 
 **Severity:** Performance concern (concurrent reads)
 
@@ -272,7 +281,7 @@ Likely fix:
   lock-free.
 - Alternatively, expose a borrowed snapshot resolver for read-heavy passes.
 
-### 7. Slot Chunks Over-Provision For Token Children
+### 8. Slot Chunks Over-Provision For Token Children
 
 **Severity:** Memory performance concern
 
@@ -299,7 +308,7 @@ Likely fix:
   `GreenNodeStorage` for wide nodes). Adds one indirection per realization,
   saves memory proportional to token density.
 
-### 8. `GreenSnapshotEncoder.collect` Allocates Canonical Nodes Before Dedup Check
+### 9. `GreenSnapshotEncoder.collect` Allocates Canonical Nodes Before Dedup Check
 
 **Severity:** Performance concern (serialization path)
 
@@ -321,7 +330,7 @@ Likely fix:
 - Dedup via a key on `(rawKind, [childIDs])` *before* allocating the canonical
   node.
 
-### 9. `BinaryWriter.bytes` Doesn't Reserve Capacity
+### 10. `BinaryWriter.bytes` Doesn't Reserve Capacity
 
 **Severity:** Minor performance concern
 
@@ -344,7 +353,7 @@ Likely fix:
 - Call `bytes.reserveCapacity(estimatedSize)` once before the body of `encode`,
   with an estimate based on the known record/string counts.
 
-### 10. `RedArena.realizeChildNode` Slow Path Serializes On A Single Mutex
+### 11. `RedArena.realizeChildNode` Slow Path Serializes On A Single Mutex
 
 **Severity:** Performance concern (concurrent traversal)
 
@@ -367,7 +376,7 @@ Likely fix candidates:
 - Thread-local arena that periodically merges into shared state.
 - Benchmark first to confirm contention before changing the model.
 
-### 11. Recursive Traversal Risks Stack Overflow On Pathological Inputs
+### 12. Recursive Traversal Risks Stack Overflow On Pathological Inputs
 
 **Severity:** Robustness concern
 
@@ -397,11 +406,6 @@ Likely fix:
 
 ## Lower-Impact Issues Worth Noting
 
-- `BuilderCheckpoint.startNode(at:)` doesn't enforce that no parents were
-  opened or closed since the checkpoint
-  (`Sources/CambiumBuilder/GreenTreeBuilder.swift:885-891`). Misuse silently
-  produces a corrupted tree shape rather than throwing. Validate
-  `parents.count == checkpoint.parentCount`.
 - Repeated `replacing(_:with: GreenTreeSnapshot, cache:)` calls produce a
   growing chain of `OverlayTokenResolver` wrappings — each new tree wraps the
   previous tree's overlay. Long edit sessions accumulate resolver lookup

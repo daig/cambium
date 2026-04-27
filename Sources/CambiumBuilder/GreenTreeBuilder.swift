@@ -9,6 +9,15 @@ final class MutexBox<Value>: @unchecked Sendable {
     }
 }
 
+private enum BuilderIDGenerator {
+    static let next = Atomic<UInt64>(1)
+
+    static func make() -> UInt64 {
+        let result = next.wrappingAdd(1, ordering: .relaxed)
+        return result.oldValue
+    }
+}
+
 /// Caching policy for `GreenNodeCache`.
 ///
 /// All policies cache tokens unconditionally when caching is enabled. Green
@@ -523,10 +532,19 @@ public final class SharedGreenNodeCache<Lang: SyntaxLanguage>: @unchecked Sendab
 }
 
 public struct BuilderCheckpoint: Sendable, Hashable {
+    fileprivate let builderID: UInt64
+    fileprivate let parentID: UInt64?
     fileprivate let parentCount: Int
     fileprivate let childCount: Int
 
-    public init(parentCount: Int, childCount: Int) {
+    fileprivate init(
+        builderID: UInt64,
+        parentID: UInt64?,
+        parentCount: Int,
+        childCount: Int
+    ) {
+        self.builderID = builderID
+        self.parentID = parentID
         self.parentCount = parentCount
         self.childCount = childCount
     }
@@ -549,6 +567,7 @@ public enum GreenTreeBuilderError: Error, Sendable, Equatable {
 }
 
 struct OpenNode {
+    var id: UInt64
     var kind: RawSyntaxKind
     var firstChildIndex: Int
 }
@@ -943,23 +962,29 @@ struct ReusedSubtreeTokenRemapper<Lang: SyntaxLanguage> {
 }
 
 public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
+    private let builderID: UInt64
     private let cacheStorage: GreenNodeCacheStorage<Lang>
     private var parents: [OpenNode]
     private var children: [GreenElement<Lang>]
+    private var nextParentID: UInt64
     private var finished: Bool
 
     public init(cache: consuming GreenNodeCache<Lang>) {
+        self.builderID = BuilderIDGenerator.make()
         self.cacheStorage = cache.takeStorage()
         self.parents = []
         self.children = []
+        self.nextParentID = 1
         self.finished = false
     }
 
     public init(policy: GreenCachePolicy = .documentLocal) {
         let cache = GreenNodeCacheStorage<Lang>(policy: policy)
+        self.builderID = BuilderIDGenerator.make()
         self.cacheStorage = cache
         self.parents = []
         self.children = []
+        self.nextParentID = 1
         self.finished = false
     }
 
@@ -969,7 +994,11 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
 
     public mutating func startNode(rawKind: RawSyntaxKind) {
         precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
-        parents.append(OpenNode(kind: rawKind, firstChildIndex: children.count))
+        parents.append(OpenNode(
+            id: makeParentID(),
+            kind: rawKind,
+            firstChildIndex: children.count
+        ))
     }
 
     public mutating func finishNode() throws {
@@ -1066,19 +1095,31 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
     }
 
     public mutating func checkpoint() -> BuilderCheckpoint {
-        BuilderCheckpoint(parentCount: parents.count, childCount: children.count)
+        precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
+        return BuilderCheckpoint(
+            builderID: builderID,
+            parentID: parents.last?.id,
+            parentCount: parents.count,
+            childCount: children.count
+        )
     }
 
     public mutating func startNode(at checkpoint: BuilderCheckpoint, _ kind: Lang.Kind) throws {
-        try validate(checkpoint)
+        precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
+        try validateStartNodeCheckpoint(checkpoint)
         let wrapped = Array(children[checkpoint.childCount...])
         children.removeSubrange(checkpoint.childCount...)
-        parents.append(OpenNode(kind: Lang.rawKind(for: kind), firstChildIndex: children.count))
+        parents.append(OpenNode(
+            id: makeParentID(),
+            kind: Lang.rawKind(for: kind),
+            firstChildIndex: children.count
+        ))
         children.append(contentsOf: wrapped)
     }
 
     public mutating func revert(to checkpoint: BuilderCheckpoint) throws {
-        try validate(checkpoint)
+        precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
+        try validateRevertCheckpoint(checkpoint)
         parents.removeSubrange(checkpoint.parentCount...)
         children.removeSubrange(checkpoint.childCount...)
     }
@@ -1156,12 +1197,46 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
         return root
     }
 
-    private func validate(_ checkpoint: BuilderCheckpoint) throws {
-        guard checkpoint.parentCount <= parents.count,
+    private mutating func makeParentID() -> UInt64 {
+        precondition(nextParentID < UInt64.max, "Builder parent id space exhausted")
+        let id = nextParentID
+        nextParentID += 1
+        return id
+    }
+
+    private func validateStartNodeCheckpoint(_ checkpoint: BuilderCheckpoint) throws {
+        guard checkpoint.builderID == builderID,
+              checkpoint.parentCount == parents.count,
+              checkpoint.parentID == parents.last?.id,
               checkpoint.childCount <= children.count
         else {
             throw GreenTreeBuilderError.invalidCheckpoint
         }
+
+        if let currentParent = parents.last, checkpoint.childCount < currentParent.firstChildIndex {
+            throw GreenTreeBuilderError.invalidCheckpoint
+        }
+    }
+
+    private func validateRevertCheckpoint(_ checkpoint: BuilderCheckpoint) throws {
+        guard checkpoint.builderID == builderID,
+              checkpoint.parentCount <= parents.count,
+              checkpoint.childCount <= children.count,
+              checkpointParentExists(checkpoint)
+        else {
+            throw GreenTreeBuilderError.invalidCheckpoint
+        }
+    }
+
+    private func checkpointParentExists(_ checkpoint: BuilderCheckpoint) -> Bool {
+        guard checkpoint.parentCount > 0 else {
+            return checkpoint.parentID == nil
+        }
+        let parentIndex = checkpoint.parentCount - 1
+        guard parents.indices.contains(parentIndex) else {
+            return false
+        }
+        return parents[parentIndex].id == checkpoint.parentID
     }
 }
 
