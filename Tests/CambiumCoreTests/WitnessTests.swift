@@ -21,7 +21,7 @@ import Testing
     replacementBuilder.startNode(.list)
     try replacementBuilder.token(.identifier, text: "fresh")
     try replacementBuilder.finishNode()
-    let replacement = try replacementBuilder.finish().root
+    let replacement = try replacementBuilder.finish().snapshot
 
     var cache = GreenNodeCache<TestLanguage>()
     let result = try shared.replacing(handleToChild1, with: replacement, cache: &cache)
@@ -30,7 +30,7 @@ import Testing
 
     #expect(witness.replacedPath == [1])
     #expect(witness.oldRoot.identity == shared.rootGreen.identity)
-    #expect(witness.newSubtree.identity == replacement.identity)
+    #expect(witness.newSubtree.rawKind == replacement.root.rawKind)
 
     // Sibling at v1 path [0] keeps the same green storage as v0 child[0].
     let v1Child0Identity = newTree.withRoot { root in
@@ -50,7 +50,7 @@ import Testing
     replacementBuilder.startNode(.list)
     try replacementBuilder.token(.identifier, text: "fresh")
     try replacementBuilder.finishNode()
-    let replacement = try replacementBuilder.finish().root
+    let replacement = try replacementBuilder.finish().snapshot
 
     var cache = GreenNodeCache<TestLanguage>()
     let result = try shared.replacing(handleToChild1, with: replacement, cache: &cache)
@@ -68,7 +68,7 @@ import Testing
 
     // Equal → replacedRoot with newSubtree
     if case .replacedRoot(let returned) = witness.classify(path: [1]) {
-        #expect(returned.identity == replacement.identity)
+        #expect(returned.identity == witness.newSubtree.identity)
     } else {
         Issue.record("Expected .replacedRoot for path [1]")
     }
@@ -87,7 +87,7 @@ import Testing
     replacementBuilder.startNode(.root)
     try replacementBuilder.token(.identifier, text: "new")
     try replacementBuilder.finishNode()
-    let replacement = try replacementBuilder.finish().root
+    let replacement = try replacementBuilder.finish().snapshot
 
     var cache = GreenNodeCache<TestLanguage>()
     let result = try shared.replacing(rootHandle, with: replacement, cache: &cache)
@@ -113,12 +113,12 @@ import Testing
     let handleToChild1 = shared.withRoot { root in
         root.withChildNode(at: 1) { $0.makeHandle() }!
     }
-    let oldChild1Green = handleToChild1.withCursor { cursor in
-        cursor.green { $0 }
+    let oldChild1Resolved = handleToChild1.withCursor { cursor in
+        cursor.resolvedGreenNode()
     }
 
     var cache = GreenNodeCache<TestLanguage>()
-    let result = try shared.replacing(handleToChild1, with: oldChild1Green, cache: &cache)
+    let result = try shared.replacing(handleToChild1, with: oldChild1Resolved, cache: &cache)
     let witness = result.witness
     let newTree = result.intoTree()
 
@@ -171,6 +171,235 @@ import Testing
 
     let text = newTree.withRoot { $0.makeString() }
     #expect(text == "keepswapped")
+}
+
+@Test func resolvedReplacementUsesForeignResolverText() throws {
+    var targetBuilder = GreenTreeBuilder<TestLanguage>()
+    targetBuilder.startNode(.root)
+    try targetBuilder.token(.identifier, text: "old")
+    try targetBuilder.finishNode()
+    let shared = try targetBuilder.finish().snapshot.makeSyntaxTree().share()
+
+    let replacement = try makeRootSnapshot("foreign")
+    var cache = GreenNodeCache<TestLanguage>()
+    let result = try shared.replacing(
+        shared.rootHandle(),
+        with: ResolvedGreenNode(root: replacement.root, resolver: replacement.tokenText),
+        cache: &cache
+    )
+    let newTree = result.intoTree()
+
+    #expect(newTree.withRoot { $0.makeString() } == "foreign")
+}
+
+@Test func sameNamespaceReplacementKeepsTargetResolverNamespace() throws {
+    let shared = try makeTwoListRoot().share()
+    let originalNamespace = shared.resolver.tokenKeyNamespace
+    let replacement = shared.withRoot { root in
+        root.withChildNode(at: 0) { child in
+            child.resolvedGreenNode()
+        }!
+    }
+    let handleToChild1 = shared.withRoot { root in
+        root.withChildNode(at: 1) { $0.makeHandle() }!
+    }
+
+    var cache = GreenNodeCache<TestLanguage>()
+    let result = try shared.replacing(handleToChild1, with: replacement, cache: &cache)
+    let witness = result.witness
+    let newTree = result.intoTree()
+
+    #expect(originalNamespace != nil)
+    #expect(newTree.resolver.tokenKeyNamespace === originalNamespace)
+    #expect(witness.newSubtree.identity == replacement.root.identity)
+    #expect(newTree.withRoot { $0.makeString() } == "keepkeep")
+}
+
+@Test func replacementBySelfResolvedNodePreservesRootIdentity() throws {
+    let shared = try makeTwoListRoot().share()
+    let handleToChild1 = shared.withRoot { root in
+        root.withChildNode(at: 1) { $0.makeHandle() }!
+    }
+    let replacement = handleToChild1.withCursor { cursor in
+        cursor.resolvedGreenNode()
+    }
+
+    var cache = GreenNodeCache<TestLanguage>()
+    let result = try shared.replacing(handleToChild1, with: replacement, cache: &cache)
+    let witness = result.witness
+    let newTree = result.intoTree()
+
+    #expect(witness.oldSubtree.identity == witness.newSubtree.identity)
+    #expect(witness.oldRoot.identity == witness.newRoot.identity)
+    #expect(newTree.rootGreen.identity == shared.rootGreen.identity)
+    if case .unchanged = witness.classify(path: [1]) {} else {
+        Issue.record("Expected replacement-by-self to classify replaced path as unchanged")
+    }
+}
+
+@Test func crossNamespaceReplacementWithCompatibleCacheRemapsIntoCacheResolver() throws {
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.root)
+    builder.startNode(.list)
+    try builder.token(.identifier, text: "keep")
+    try builder.finishNode()
+    builder.startNode(.list)
+    try builder.token(.identifier, text: "old")
+    try builder.finishNode()
+    try builder.finishNode()
+
+    let buildResult = try builder.finish()
+    let shared = buildResult.snapshot.makeSyntaxTree().share()
+    let originalNamespace = shared.resolver.tokenKeyNamespace
+    var cache = buildResult.intoCache()
+    let handleToChild1 = shared.withRoot { root in
+        root.withChildNode(at: 1) { $0.makeHandle() }!
+    }
+    let replacement = try makeListSnapshot("cache-remapped")
+
+    let result = try shared.replacing(handleToChild1, with: replacement, cache: &cache)
+    let newTree = result.intoTree()
+
+    #expect(newTree.withRoot { $0.makeString() } == "keepcache-remapped")
+    #expect(originalNamespace != nil)
+    #expect(newTree.resolver.tokenKeyNamespace === originalNamespace)
+
+    var reuseBuilder = GreenTreeBuilder<TestLanguage>(cache: cache)
+    reuseBuilder.startNode(.root)
+    let outcome = try newTree.withRoot { root in
+        try reuseBuilder.reuseSubtree(root)
+    }
+    #expect(outcome == .direct)
+}
+
+@Test func overlayFallbackDoesNotShadowPreservedOldTokens() throws {
+    let shared = try makeTwoListRoot().share()
+    let handleToChild1 = shared.withRoot { root in
+        root.withChildNode(at: 1) { $0.makeHandle() }!
+    }
+
+    var cache = GreenNodeCache<TestLanguage>()
+    let result = try shared.replacing(handleToChild1, with: try makeListSnapshot("new"), cache: &cache)
+    let newTree = result.intoTree()
+
+    #expect(newTree.withRoot { $0.makeString() } == "keepnew")
+}
+
+@Test func chainedOverlayReplacementAllocatesAbovePriorOverlayKeys() throws {
+    let shared = try makeTwoListRoot().share()
+    let handleToChild1 = shared.withRoot { root in
+        root.withChildNode(at: 1) { $0.makeHandle() }!
+    }
+
+    var cache = GreenNodeCache<TestLanguage>()
+    let firstResult = try shared.replacing(handleToChild1, with: try makeListSnapshot("one"), cache: &cache)
+    let firstKey = firstInternedTokenKey(in: firstResult.witness.newSubtree)
+    let firstTree = firstResult.intoTree()
+    let firstShared = firstTree.share()
+    let handleToChild0 = firstShared.withRoot { root in
+        root.withChildNode(at: 0) { $0.makeHandle() }!
+    }
+
+    let secondResult = try firstShared.replacing(handleToChild0, with: try makeListSnapshot("two"), cache: &cache)
+    let secondKey = firstInternedTokenKey(in: secondResult.witness.newSubtree)
+    let secondTree = secondResult.intoTree()
+
+    if let firstKey, let secondKey {
+        #expect(secondKey.rawValue > firstKey.rawValue)
+    } else {
+        Issue.record("Expected both overlay replacements to allocate interned token keys")
+    }
+    #expect(secondTree.withRoot { $0.makeString() } == "twoone")
+}
+
+@Test func overlayFallbackDoesNotCacheSyntheticReplacementIdentities() throws {
+    let shared = try makeTwoListRoot().share()
+    let handleToChild1 = shared.withRoot { root in
+        root.withChildNode(at: 1) { $0.makeHandle() }!
+    }
+
+    var cache = GreenNodeCache<TestLanguage>()
+    let firstResult = try shared.replacing(handleToChild1, with: try makeListSnapshot("one"), cache: &cache)
+    let firstIdentity = firstResult.witness.newSubtree.identity
+    let firstTree = firstResult.intoTree()
+    let secondResult = try shared.replacing(handleToChild1, with: try makeListSnapshot("two"), cache: &cache)
+    let secondIdentity = secondResult.witness.newSubtree.identity
+    let secondTree = secondResult.intoTree()
+
+    #expect(firstTree.withRoot { $0.makeString() } == "keepone")
+    #expect(secondTree.withRoot { $0.makeString() } == "keeptwo")
+    #expect(firstIdentity != secondIdentity)
+}
+
+@Test func cacheRemapReplacementUsesFreshSnapshotWhenCacheGrewBeyondTargetSnapshot() throws {
+    // Tree A is built with cache C; A's resolver is a snapshot taken at
+    // that moment. C is then used by another builder that mints a new
+    // dynamic key. When we replace into A with a cross-namespace
+    // replacement whose text matches the post-snapshot key, the
+    // remapper hits an existing key (no new mint). Reusing A's stale
+    // resolver would precondition-fail on render.
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.root)
+    try builder.token(.identifier, text: "keep")
+    try builder.finishNode()
+    let buildResult = try builder.finish()
+    let shared = buildResult.snapshot.makeSyntaxTree().share()
+    var cache = buildResult.intoCache()
+
+    var growBuilder = GreenTreeBuilder<TestLanguage>(cache: cache)
+    growBuilder.startNode(.root)
+    try growBuilder.token(.identifier, text: "extra")
+    try growBuilder.finishNode()
+    cache = try growBuilder.finish().intoCache()
+
+    let replacement = try makeRootSnapshot("extra")
+    let result = try shared.replacing(shared.rootHandle(), with: replacement, cache: &cache)
+    let newTree = result.intoTree()
+
+    #expect(newTree.withRoot { $0.makeString() } == "extra")
+    #expect(newTree.resolver.tokenKeyNamespace === shared.resolver.tokenKeyNamespace)
+}
+
+@Test func sameNamespaceReplacementWithMatchingCacheUsesFreshSnapshot() throws {
+    // Tree A is built with cache C. A second builder, also using C,
+    // builds a replacement whose snapshot has more keys than A's
+    // resolver. The replacement carries that fresher snapshot. Same
+    // namespace, matching cache → branch 2A. Reusing A's resolver
+    // would precondition-fail on the new key.
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.root)
+    builder.startNode(.list)
+    try builder.token(.identifier, text: "keep")
+    try builder.finishNode()
+    builder.startNode(.list)
+    try builder.token(.identifier, text: "old")
+    try builder.finishNode()
+    try builder.finishNode()
+    let buildResult = try builder.finish()
+    let originalNamespace = buildResult.tokenText.tokenKeyNamespace
+    let shared = buildResult.snapshot.makeSyntaxTree().share()
+    var cache = buildResult.intoCache()
+
+    var replacementBuilder = GreenTreeBuilder<TestLanguage>(cache: cache)
+    replacementBuilder.startNode(.list)
+    try replacementBuilder.token(.identifier, text: "newkey")
+    try replacementBuilder.finishNode()
+    let replacementResult = try replacementBuilder.finish()
+    let replacementResolved = ResolvedGreenNode(
+        root: replacementResult.root,
+        resolver: replacementResult.tokenText
+    )
+    cache = replacementResult.intoCache()
+
+    let handleToChild1 = shared.withRoot { root in
+        root.withChildNode(at: 1) { $0.makeHandle() }!
+    }
+    let result = try shared.replacing(handleToChild1, with: replacementResolved, cache: &cache)
+    let newTree = result.intoTree()
+
+    #expect(newTree.withRoot { $0.makeString() } == "keepnewkey")
+    #expect(originalNamespace != nil)
+    #expect(newTree.resolver.tokenKeyNamespace === originalNamespace)
 }
 
 @Test func acceptedReuseLogDrainsAndDoesNotAccumulateAcrossDrains() throws {
@@ -357,6 +586,38 @@ private func makeNestedListPrefixTree() throws -> SyntaxTree<TestLanguage> {
     try builder.finishNode()
     try builder.finishNode()
     return try builder.finish().snapshot.makeSyntaxTree()
+}
+
+private func makeRootSnapshot(_ text: String) throws -> GreenTreeSnapshot<TestLanguage> {
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.root)
+    try builder.token(.identifier, text: text)
+    try builder.finishNode()
+    return try builder.finish().snapshot
+}
+
+private func makeListSnapshot(_ text: String) throws -> GreenTreeSnapshot<TestLanguage> {
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.list)
+    try builder.token(.identifier, text: text)
+    try builder.finishNode()
+    return try builder.finish().snapshot
+}
+
+private func firstInternedTokenKey(in node: GreenNode<TestLanguage>) -> TokenKey? {
+    for childIndex in 0..<node.childCount {
+        switch node.child(at: childIndex) {
+        case .node(let child):
+            if let key = firstInternedTokenKey(in: child) {
+                return key
+            }
+        case .token(let token):
+            if case .interned(let key) = token.textStorage {
+                return key
+            }
+        }
+    }
+    return nil
 }
 
 private func secondListRange(in tree: SharedSyntaxTree<TestLanguage>) -> TextRange {

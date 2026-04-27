@@ -544,3 +544,15 @@ public enum GreenElement<Lang: SyntaxLanguage>: @unchecked Sendable, Hashable {
         }
     }
 }
+
+/// A green subtree paired with the resolver that gives meaning to its dynamic
+/// token keys.
+public struct ResolvedGreenNode<Lang: SyntaxLanguage>: Sendable {
+    public let root: GreenNode<Lang>
+    public let resolver: any TokenResolver
+
+    public init(root: GreenNode<Lang>, resolver: any TokenResolver) {
+        self.root = root
+        self.resolver = resolver
+    }
+}

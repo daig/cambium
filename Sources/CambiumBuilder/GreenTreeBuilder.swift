@@ -625,11 +625,7 @@ final class OverlayTokenResolver: TokenResolver, @unchecked Sendable {
     }
 }
 
-struct ReplacementTokenRemapper<Lang: SyntaxLanguage> {
-    var nextInterned: UInt32 = UInt32.max
-    var nextLarge: UInt32 = UInt32.max
-    var interned: [TokenKey: String] = [:]
-    var large: [LargeTokenTextID: String] = [:]
+struct CacheReplacementTokenRemapper<Lang: SyntaxLanguage> {
     var internedMap: [TokenKey: TokenKey] = [:]
     var largeMap: [LargeTokenTextID: LargeTokenTextID] = [:]
 
@@ -672,8 +668,120 @@ struct ReplacementTokenRemapper<Lang: SyntaxLanguage> {
             text = .missing
         case .interned(let key):
             let mapped = internedMap[key] ?? {
-                let newKey = TokenKey(nextInterned)
-                nextInterned -= 1
+                let newKey = replacementResolver.withUTF8(key) { bytes in
+                    cache.intern(bytes)
+                }
+                internedMap[key] = newKey
+                return newKey
+            }()
+            text = .interned(mapped)
+        case .ownedLargeText(let id):
+            let mapped = largeMap[id] ?? {
+                let newID = cache.storeLargeText(replacementResolver.resolveLargeText(id))
+                largeMap[id] = newID
+                return newID
+            }()
+            text = .ownedLargeText(mapped)
+        }
+        return cache.makeToken(kind: token.rawKind, textLength: token.textLength, text: text)
+    }
+}
+
+private struct DynamicTokenMaxima {
+    var interned: UInt32?
+    var large: UInt32?
+
+    mutating func record(_ storage: TokenTextStorage) {
+        switch storage {
+        case .staticText, .missing:
+            break
+        case .interned(let key):
+            interned = max(interned ?? key.rawValue, key.rawValue)
+        case .ownedLargeText(let id):
+            large = max(large ?? id.rawValue, id.rawValue)
+        }
+    }
+}
+
+private func dynamicTokenMaxima<Lang: SyntaxLanguage>(in node: GreenNode<Lang>) -> DynamicTokenMaxima {
+    var maxima = DynamicTokenMaxima()
+    recordDynamicTokenMaxima(in: node, into: &maxima)
+    return maxima
+}
+
+private func recordDynamicTokenMaxima<Lang: SyntaxLanguage>(
+    in node: GreenNode<Lang>,
+    into maxima: inout DynamicTokenMaxima
+) {
+    for childIndex in 0..<node.childCount {
+        switch node.child(at: childIndex) {
+        case .node(let child):
+            recordDynamicTokenMaxima(in: child, into: &maxima)
+        case .token(let token):
+            maxima.record(token.textStorage)
+        }
+    }
+}
+
+private func nextOverlayRawValue(after maxValue: UInt32?) -> UInt32 {
+    guard let maxValue else {
+        return 0
+    }
+    precondition(maxValue < UInt32.max, "Overlay token key space exhausted")
+    return maxValue + 1
+}
+
+struct OverlayReplacementTokenRemapper<Lang: SyntaxLanguage> {
+    var nextInterned: UInt32
+    var nextLarge: UInt32
+    var interned: [TokenKey: String] = [:]
+    var large: [LargeTokenTextID: String] = [:]
+    var internedMap: [TokenKey: TokenKey] = [:]
+    var largeMap: [LargeTokenTextID: LargeTokenTextID] = [:]
+    private var internedExhausted = false
+    private var largeExhausted = false
+
+    init(nextInterned: UInt32, nextLarge: UInt32) {
+        self.nextInterned = nextInterned
+        self.nextLarge = nextLarge
+    }
+
+    mutating func remap(
+        node: GreenNode<Lang>,
+        replacementResolver: any TokenResolver
+    ) throws -> GreenNode<Lang> {
+        var children: [GreenElement<Lang>] = []
+        children.reserveCapacity(node.childCount)
+        for childIndex in 0..<node.childCount {
+            switch node.child(at: childIndex) {
+            case .node(let child):
+                children.append(.node(try remap(
+                    node: child,
+                    replacementResolver: replacementResolver
+                )))
+            case .token(let token):
+                children.append(.token(remap(
+                    token: token,
+                    replacementResolver: replacementResolver
+                )))
+            }
+        }
+        return try GreenNode<Lang>(kind: node.rawKind, children: children)
+    }
+
+    mutating func remap(
+        token: GreenToken<Lang>,
+        replacementResolver: any TokenResolver
+    ) -> GreenToken<Lang> {
+        let text: TokenTextStorage
+        switch token.textStorage {
+        case .staticText:
+            text = .staticText
+        case .missing:
+            text = .missing
+        case .interned(let key):
+            let mapped = internedMap[key] ?? {
+                let newKey = nextOverlayTokenKey()
                 internedMap[key] = newKey
                 interned[newKey] = replacementResolver.resolve(key)
                 return newKey
@@ -681,15 +789,36 @@ struct ReplacementTokenRemapper<Lang: SyntaxLanguage> {
             text = .interned(mapped)
         case .ownedLargeText(let id):
             let mapped = largeMap[id] ?? {
-                let newID = LargeTokenTextID(nextLarge)
-                nextLarge -= 1
+                let newID = nextOverlayLargeTextID()
                 largeMap[id] = newID
                 large[newID] = replacementResolver.resolveLargeText(id)
                 return newID
             }()
             text = .ownedLargeText(mapped)
         }
-        return cache.makeToken(kind: token.rawKind, textLength: token.textLength, text: text)
+        return GreenToken<Lang>(kind: token.rawKind, textLength: token.textLength, text: text)
+    }
+
+    private mutating func nextOverlayTokenKey() -> TokenKey {
+        precondition(!internedExhausted, "Overlay token key space exhausted")
+        let key = TokenKey(nextInterned)
+        if nextInterned == UInt32.max {
+            internedExhausted = true
+        } else {
+            nextInterned += 1
+        }
+        return key
+    }
+
+    private mutating func nextOverlayLargeTextID() -> LargeTokenTextID {
+        precondition(!largeExhausted, "Overlay large token text key space exhausted")
+        let id = LargeTokenTextID(nextLarge)
+        if nextLarge == UInt32.max {
+            largeExhausted = true
+        } else {
+            nextLarge += 1
+        }
+        return id
     }
 }
 
@@ -978,22 +1107,7 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
     }
 }
 
-public extension SyntaxNodeCursor {
-    borrowing func replacingSelf(
-        with replacement: GreenNode<Lang>,
-        using cache: inout GreenNodeCache<Lang>
-    ) throws -> GreenNode<Lang> {
-        let path = childIndexPath()
-        return try rebuildReplacing(
-            root: rootGreen,
-            path: ArraySlice(path),
-            replacement: replacement,
-            cache: &cache
-        )
-    }
-}
-
-private func rebuildReplacing<Lang: SyntaxLanguage>(
+private func rebuildReplacingCached<Lang: SyntaxLanguage>(
     root: GreenNode<Lang>,
     path: ArraySlice<UInt32>,
     replacement: GreenNode<Lang>,
@@ -1011,7 +1125,7 @@ private func rebuildReplacing<Lang: SyntaxLanguage>(
     guard case .node(let child) = children[index] else {
         throw GreenTreeBuilderError.childIndexIsToken
     }
-    let rebuilt = try rebuildReplacing(
+    let rebuilt = try rebuildReplacingCached(
         root: child,
         path: path.dropFirst(),
         replacement: replacement,
@@ -1019,6 +1133,32 @@ private func rebuildReplacing<Lang: SyntaxLanguage>(
     )
     children[index] = .node(rebuilt)
     return try cache.makeNode(kind: root.rawKind, children: children)
+}
+
+private func rebuildReplacingDirect<Lang: SyntaxLanguage>(
+    root: GreenNode<Lang>,
+    path: ArraySlice<UInt32>,
+    replacement: GreenNode<Lang>
+) throws -> GreenNode<Lang> {
+    guard let first = path.first else {
+        return replacement
+    }
+
+    var children = root.childrenArray()
+    let index = Int(first)
+    guard children.indices.contains(index) else {
+        throw GreenTreeBuilderError.invalidCheckpoint
+    }
+    guard case .node(let child) = children[index] else {
+        throw GreenTreeBuilderError.childIndexIsToken
+    }
+    let rebuilt = try rebuildReplacingDirect(
+        root: child,
+        path: path.dropFirst(),
+        replacement: replacement
+    )
+    children[index] = .node(rebuilt)
+    return try GreenNode<Lang>(kind: root.rawKind, children: children)
 }
 
 public extension SharedSyntaxTree {
@@ -1030,9 +1170,23 @@ public extension SharedSyntaxTree {
     /// `handle` must be from this tree; passing a handle from a different
     /// tree traps. (Cross-tree replacement is not a meaningful operation —
     /// translate the handle through your own tracker first.)
+    ///
+    /// For full correctness when sharing a cache across builders or when
+    /// the replacement was built independently of this tree, pass a `cache`
+    /// whose interner is the one used to build this tree (typically
+    /// obtained via `result.intoCache()`). When the cache shares this
+    /// tree's namespace, the result tree's resolver is a fresh snapshot of
+    /// the cache covering every key referenced by the new tree.
+    ///
+    /// In the rare case where the replacement is in the same namespace as
+    /// this tree but the cache passed in is in a different namespace, this
+    /// tree's resolver is reused as-is. If the replacement was taken from
+    /// a fresher snapshot of the same shared interner, rendering may
+    /// precondition-fail on keys that postdate this tree's snapshot. Pass
+    /// a namespace-matching cache to avoid this.
     func replacing(
         _ handle: SyntaxNodeHandle<Lang>,
-        with replacement: GreenNode<Lang>,
+        with replacement: ResolvedGreenNode<Lang>,
         cache: inout GreenNodeCache<Lang>
     ) throws -> ReplacementResult<Lang> {
         precondition(
@@ -1045,65 +1199,14 @@ public extension SharedSyntaxTree {
             let oldSub = cursor.green { $0 }
             return (path, oldSub)
         }
-        let newRoot: GreenNode<Lang>
-        if oldSubtree.identity == replacement.identity {
-            newRoot = oldRoot
-        } else {
-            newRoot = try rebuildReplacing(
-                root: oldRoot,
-                path: ArraySlice(replacedPath),
-                replacement: replacement,
-                cache: &cache
-            )
-        }
-        let witness = ReplacementWitness(
-            oldRoot: oldRoot,
-            newRoot: newRoot,
-            replacedPath: replacedPath,
-            oldSubtree: oldSubtree,
-            newSubtree: replacement
-        )
-        return ReplacementResult(
-            tree: SyntaxTree(root: newRoot, resolver: resolver),
-            witness: witness
-        )
-    }
 
-    /// Same as `replacing(_:with:cache:)` for `GreenNode`, but accepts a
-    /// cacheless snapshot produced by an independent `GreenTreeBuilder`.
-    /// Token interner keys in the replacement are remapped through `cache`
-    /// so the returned tree's resolver can resolve them; the witness's
-    /// `newSubtree` is the remapped subtree (which is what actually lives
-    /// in the new tree).
-    func replacing(
-        _ handle: SyntaxNodeHandle<Lang>,
-        with replacement: GreenTreeSnapshot<Lang>,
-        cache: inout GreenNodeCache<Lang>
-    ) throws -> ReplacementResult<Lang> {
-        precondition(
-            handle.identity.treeID == treeID,
-            "SyntaxNodeHandle is from a different tree than the SharedSyntaxTree it is being applied to"
-        )
-        var remapper = ReplacementTokenRemapper<Lang>()
-        let remappedReplacement = try remapper.remap(
-            node: replacement.root,
-            replacementResolver: replacement.tokenText,
-            cache: &cache
-        )
-
-        let oldRoot = rootGreen
-        let (replacedPath, oldSubtree): (SyntaxNodePath, GreenNode<Lang>) = handle.withCursor { cursor in
-            let path = cursor.childIndexPath()
-            let oldSub = cursor.green { $0 }
-            return (path, oldSub)
-        }
-        if oldSubtree.identity == remappedReplacement.identity {
+        if oldSubtree.identity == replacement.root.identity {
             let witness = ReplacementWitness(
                 oldRoot: oldRoot,
                 newRoot: oldRoot,
                 replacedPath: replacedPath,
                 oldSubtree: oldSubtree,
-                newSubtree: remappedReplacement
+                newSubtree: oldSubtree
             )
             return ReplacementResult(
                 tree: SyntaxTree(root: oldRoot, resolver: resolver),
@@ -1111,16 +1214,111 @@ public extension SharedSyntaxTree {
             )
         }
 
-        let newRoot = try rebuildReplacing(
+        if let sourceNamespace = replacement.resolver.tokenKeyNamespace,
+           let targetNamespace = resolver.tokenKeyNamespace,
+           sourceNamespace === targetNamespace
+        {
+            let newRoot: GreenNode<Lang>
+            let resultResolver: any TokenResolver
+            if targetNamespace === cache.storage.interner.tokenKeyNamespace {
+                newRoot = try rebuildReplacingCached(
+                    root: oldRoot,
+                    path: ArraySlice(replacedPath),
+                    replacement: replacement.root,
+                    cache: &cache
+                )
+                // Fresh snapshot of the cache's interner. Required for
+                // correctness when the cache has grown beyond this tree's
+                // resolver snapshot (e.g., another builder using the same
+                // cache minted keys after this tree finished). The new
+                // snapshot shares the cache's `tokenKeyNamespace`, so
+                // namespace-identity continuity is preserved.
+                let interner = LocalTokenInterner(storage: cache.storage.interner)
+                resultResolver = interner.snapshot()
+            } else {
+                newRoot = try rebuildReplacingDirect(
+                    root: oldRoot,
+                    path: ArraySlice(replacedPath),
+                    replacement: replacement.root
+                )
+                resultResolver = resolver
+            }
+            let witness = ReplacementWitness(
+                oldRoot: oldRoot,
+                newRoot: newRoot,
+                replacedPath: replacedPath,
+                oldSubtree: oldSubtree,
+                newSubtree: replacement.root
+            )
+            return ReplacementResult(
+                tree: SyntaxTree(root: newRoot, resolver: resultResolver),
+                witness: witness
+            )
+        }
+
+        if let targetNamespace = resolver.tokenKeyNamespace,
+           targetNamespace === cache.storage.interner.tokenKeyNamespace
+        {
+            var remapper = CacheReplacementTokenRemapper<Lang>()
+            let remappedReplacement = try remapper.remap(
+                node: replacement.root,
+                replacementResolver: replacement.resolver,
+                cache: &cache
+            )
+            let newRoot: GreenNode<Lang>
+            if oldSubtree.identity == remappedReplacement.identity {
+                newRoot = oldRoot
+            } else {
+                newRoot = try rebuildReplacingCached(
+                    root: oldRoot,
+                    path: ArraySlice(replacedPath),
+                    replacement: remappedReplacement,
+                    cache: &cache
+                )
+            }
+            // Fresh snapshot of the cache's interner. Re-interning may have
+            // returned existing keys minted before this tree's resolver
+            // snapshot was taken (e.g., from another builder sharing the
+            // cache), so reusing `resolver` could leave the new tree
+            // referencing keys outside its snapshot.
+            let interner = LocalTokenInterner(storage: cache.storage.interner)
+            let resultResolver = interner.snapshot()
+            let witness = ReplacementWitness(
+                oldRoot: oldRoot,
+                newRoot: newRoot,
+                replacedPath: replacedPath,
+                oldSubtree: oldSubtree,
+                newSubtree: remappedReplacement
+            )
+            return ReplacementResult(
+                tree: SyntaxTree(root: newRoot, resolver: resultResolver),
+                witness: witness
+            )
+        }
+
+        // Fallback for incompatible namespaces. The replacement subtree and
+        // rebuilt ancestors intentionally bypass `GreenNodeCache`: the overlay
+        // keys are resolver-local and caching them would make unrelated
+        // replacements with equal raw synthetic keys share green identity.
+        let candidateRoot = try rebuildReplacingDirect(
             root: oldRoot,
             path: ArraySlice(replacedPath),
-            replacement: remappedReplacement,
-            cache: &cache
+            replacement: replacement.root
         )
-        // If the replacement contributed no dynamic-token text, the overlay
-        // would be a pure pass-through to `resolver`. Skip it so the result
-        // tree's resolver retains the base's `tokenKeyNamespace`, which lets
-        // a subsequent `reuseSubtree` from this tree fast-path-match.
+        let maxima = dynamicTokenMaxima(in: candidateRoot)
+        var remapper = OverlayReplacementTokenRemapper<Lang>(
+            nextInterned: nextOverlayRawValue(after: maxima.interned),
+            nextLarge: nextOverlayRawValue(after: maxima.large)
+        )
+        let remappedReplacement = try remapper.remap(
+            node: replacement.root,
+            replacementResolver: replacement.resolver
+        )
+        let newRoot = try rebuildReplacingDirect(
+            root: oldRoot,
+            path: ArraySlice(replacedPath),
+            replacement: remappedReplacement
+        )
         let resultResolver: any TokenResolver
         if remapper.interned.isEmpty && remapper.large.isEmpty {
             resultResolver = resolver
@@ -1144,6 +1342,20 @@ public extension SharedSyntaxTree {
         )
     }
 
+    /// Same as `replacing(_:with:cache:)` for `ResolvedGreenNode`, but accepts
+    /// a cacheless snapshot produced by an independent `GreenTreeBuilder`.
+    func replacing(
+        _ handle: SyntaxNodeHandle<Lang>,
+        with replacement: GreenTreeSnapshot<Lang>,
+        cache: inout GreenNodeCache<Lang>
+    ) throws -> ReplacementResult<Lang> {
+        try replacing(
+            handle,
+            with: ResolvedGreenNode(root: replacement.root, resolver: replacement.tokenText),
+            cache: &cache
+        )
+    }
+
     /// Same as `replacing(_:with:cache:)` for `GreenTreeSnapshot`, but borrows
     /// the snapshot view from a cache-preserving build result.
     func replacing(
@@ -1151,6 +1363,10 @@ public extension SharedSyntaxTree {
         with replacement: borrowing GreenBuildResult<Lang>,
         cache: inout GreenNodeCache<Lang>
     ) throws -> ReplacementResult<Lang> {
-        try replacing(handle, with: replacement.snapshot, cache: &cache)
+        try replacing(
+            handle,
+            with: ResolvedGreenNode(root: replacement.root, resolver: replacement.tokenText),
+            cache: &cache
+        )
     }
 }

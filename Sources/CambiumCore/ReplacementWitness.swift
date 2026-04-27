@@ -6,9 +6,9 @@
 /// They contain no resolution logic and impose no policy. Cross-tree identity
 /// trackers consume witnesses to translate v0 references into v1.
 ///
-/// Same-tree token resolution concerns (the `OverlayTokenResolver` returned
-/// by `replacing` when remapping interner keys) are not part of the witness;
-/// they travel via the returned `SyntaxTree`.
+/// Same-tree token resolution concerns (for example, an overlay resolver used
+/// when replacement token keys cannot be remapped into the target namespace)
+/// are not part of the witness; they travel via the returned `SyntaxTree`.
 public struct ReplacementWitness<Lang: SyntaxLanguage>: Sendable {
     public let oldRoot: GreenNode<Lang>
     public let newRoot: GreenNode<Lang>

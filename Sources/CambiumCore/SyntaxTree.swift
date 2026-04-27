@@ -526,6 +526,10 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
         try body(record.green)
     }
 
+    public borrowing func resolvedGreenNode() -> ResolvedGreenNode<Lang> {
+        ResolvedGreenNode(root: record.green, resolver: storage.resolver)
+    }
+
     public mutating func moveToParent() -> Bool {
         guard let parent = record.parentRecord else {
             return false
