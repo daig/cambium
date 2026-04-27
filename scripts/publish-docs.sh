@@ -11,7 +11,18 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TARGET="Cambium"
+TARGETS=(
+  Cambium
+  CambiumCore
+  CambiumBuilder
+  CambiumIncremental
+  CambiumAnalysis
+  CambiumASTSupport
+  CambiumOwnedTraversal
+  CambiumSerialization
+  CambiumTesting
+  CambiumSyntaxMacros
+)
 HOSTING_BASE_PATH="cambium"
 BRANCH="gh-pages"
 BUILD_DIR="$(mktemp -d)"
@@ -32,11 +43,16 @@ fi
 
 SOURCE_SHA="$(git rev-parse --short HEAD)"
 
-echo "==> Building DocC for $TARGET"
+echo "==> Building combined DocC for ${TARGETS[*]}"
+TARGET_ARGS=()
+for t in "${TARGETS[@]}"; do
+  TARGET_ARGS+=(--target "$t")
+done
 swift package \
   --allow-writing-to-directory "$BUILD_DIR" \
   generate-documentation \
-  --target "$TARGET" \
+  "${TARGET_ARGS[@]}" \
+  --enable-experimental-combined-documentation \
   --disable-indexing \
   --transform-for-static-hosting \
   --hosting-base-path "$HOSTING_BASE_PATH" \
@@ -64,7 +80,7 @@ if git diff --cached --quiet; then
   echo "==> No documentation changes; nothing to publish."
   exit 0
 fi
-git commit -m "Publish DocC for $TARGET @ $SOURCE_SHA"
+git commit -m "Publish DocC @ $SOURCE_SHA"
 git push origin "$BRANCH"
 
-echo "==> Done. Live at: https://daig.github.io/${HOSTING_BASE_PATH}/documentation/$(echo "$TARGET" | tr '[:upper:]' '[:lower:]')/"
+echo "==> Done. Live at: https://daig.github.io/${HOSTING_BASE_PATH}/documentation/cambium/"
