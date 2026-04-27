@@ -9,11 +9,12 @@ performance risks that should be triaged before or shortly after v1.
 
 ## Validation Notes
 
-- Findings 1, 2, and 3 below were confirmed with temporary regression tests
+- Findings 1 and 2 below were confirmed with temporary regression tests
   during the original audit pass; those tests were removed after capture.
-  (Two earlier findings from the same audited batch — wrong-resolver
-  replacement and snapshot-replacement identity collisions — have since been
-  fixed and removed from this list.)
+  (Three earlier findings from the same audited batch — wrong-resolver
+  replacement, snapshot-replacement identity collisions, and zero-length
+  tokens leaking outside their query range — have since been fixed and
+  removed from this list.)
 - Other findings here are based on code inspection and traced behaviour rather
   than executed tests; treat them as high-confidence but unvalidated until
   tests land.
@@ -66,48 +67,7 @@ Acceptance tests:
   exactly through `withTextUTF8`.
 - Rendered byte count and stored `textLength` remain consistent.
 
-### 2. Visible-Range Token Walking Leaks Zero-Length Tokens Into Unrelated Ranges
-
-**Severity:** High
-
-**Area:** `SyntaxNodeCursor.tokens(in:_:)`
-
-The token range filter skips a child only when the child range does not
-intersect the requested range and the child range is non-empty. This lets
-zero-length tokens bypass filtering. A missing token at offset zero can be
-returned for a visible range far outside that offset as long as the recursive
-parent walk reaches it.
-
-Observed validation: a tree containing only a zero-length missing token at
-offset zero returned that token for `tokens(in: TextRange(start: 10, end: 11))`.
-
-Relevant code:
-
-- `Sources/CambiumCore/SyntaxTree.swift`
-  - `SyntaxNodeCursor.tokens(in:_:)`
-
-Why it matters:
-
-- Editor visible-range highlighting can report missing/error tokens outside the
-  viewport.
-- Formatter or diagnostic passes using range-limited token enumeration may
-  process unrelated zero-length recovery tokens.
-
-Likely fix:
-
-- Define explicit range semantics for zero-length tokens. A practical default:
-  include a zero-length token only when its offset is contained by the requested
-  range, perhaps allowing end-boundary inclusion if that matches
-  `withTokenAtOffset`.
-- Apply that rule before invoking the token callback.
-
-Acceptance tests:
-
-- Missing token at offset zero is not returned for `[10, 11)`.
-- Missing token is returned for the intended boundary ranges, including any
-  accepted empty-range semantics.
-
-### 3. `visitPreorder(.stop)` Does Not Stop Sibling Traversal
+### 2. `visitPreorder(.stop)` Does Not Stop Sibling Traversal
 
 **Severity:** Medium
 
@@ -142,7 +102,7 @@ Acceptance tests:
 - `visitPreorder` still respects `.skipChildren` as "do not descend, but keep
   walking siblings."
 
-### 4. Public Green Token Construction Can Violate Static-Text Invariants
+### 3. Public Green Token Construction Can Violate Static-Text Invariants
 
 **Severity:** Medium
 
@@ -182,7 +142,7 @@ Acceptance tests:
 - Public construction rejects `.staticText` for dynamic kinds unless the
   intended representation is explicitly "empty static text unavailable."
 
-### 5. `firstReusableNode` Aborts After First Matching Child Returns Nil
+### 4. `firstReusableNode` Aborts After First Matching Child Returns Nil
 
 **Severity:** Medium
 
@@ -218,7 +178,7 @@ Acceptance tests:
 - Two zero-length sibling nodes at the same offset, with the requested kind on
   the second, surface a reuse hit.
 
-### 6. Decoder Traps On Unknown `RawSyntaxKind` Values
+### 5. Decoder Traps On Unknown `RawSyntaxKind` Values
 
 **Severity:** Medium
 
@@ -257,7 +217,7 @@ Acceptance tests:
 - A snapshot whose raw-kind field is outside the language's enum decodes with a
   typed error rather than trapping.
 
-### 7. Overlay-Fallback Replacement Resolver Loses `tokenKeyNamespace`
+### 6. Overlay-Fallback Replacement Resolver Loses `tokenKeyNamespace`
 
 **Severity:** Medium
 
@@ -298,7 +258,7 @@ Likely fix:
 - Or merge the overlay's mappings into a fresh `TokenTextSnapshot` at
   replacement time, which preserves namespace at the cost of a copy.
 
-### 8. Node-Cache Eviction Undercounts Hash-Bucket Entries
+### 7. Node-Cache Eviction Undercounts Hash-Bucket Entries
 
 **Severity:** Medium-Low
 
@@ -335,7 +295,7 @@ Likely fix:
 
 ## Priority 1: Performance Risks
 
-### 9. Green Cache Hits Still Allocate Candidate Nodes First
+### 8. Green Cache Hits Still Allocate Candidate Nodes First
 
 **Severity:** Major performance concern
 
@@ -375,7 +335,7 @@ Measurement target:
   confirm allocation count drops on cache hits.
 - Benchmark replacement in wide shallow nodes and deep narrow nodes.
 
-### 10. String Materialization Decodes And Reallocates Per Chunk
+### 9. String Materialization Decodes And Reallocates Per Chunk
 
 **Severity:** Major performance concern
 
@@ -414,7 +374,7 @@ Measurement target:
   same total byte count.
 - Track allocations and wall time before/after a byte-buffer sink.
 
-### 11. `withDescendant(atPath:)` Triggers O(childIndex) Per Step On First Realization
+### 10. `withDescendant(atPath:)` Triggers O(childIndex) Per Step On First Realization
 
 **Severity:** Performance concern (cold path)
 
@@ -443,7 +403,7 @@ Likely fix:
 - Thread `childStart` through the loop in `withDescendant(atPath:)`, matching
   the pattern used by sibling and child traversal helpers.
 
-### 12. Token Interners Allocate `[UInt8]` On Every Lookup
+### 11. Token Interners Allocate `[UInt8]` On Every Lookup
 
 **Severity:** Major performance concern (hot path)
 
@@ -472,7 +432,7 @@ Measurement target:
 - Allocation count per `intern` call drops on cache hits.
 - Steady-state interning throughput improves on token-dense input.
 
-### 13. `SharedTokenInterner.resolve` Locks The Shard On Every Read
+### 12. `SharedTokenInterner.resolve` Locks The Shard On Every Read
 
 **Severity:** Performance concern (concurrent reads)
 
@@ -499,7 +459,7 @@ Likely fix:
   lock-free.
 - Alternatively, expose a borrowed snapshot resolver for read-heavy passes.
 
-### 14. Slot Chunks Over-Provision For Token Children
+### 13. Slot Chunks Over-Provision For Token Children
 
 **Severity:** Memory performance concern
 
@@ -526,7 +486,7 @@ Likely fix:
   `GreenNodeStorage` for wide nodes). Adds one indirection per realization,
   saves memory proportional to token density.
 
-### 15. `GreenSnapshotEncoder.collect` Allocates Canonical Nodes Before Dedup Check
+### 14. `GreenSnapshotEncoder.collect` Allocates Canonical Nodes Before Dedup Check
 
 **Severity:** Performance concern (serialization path)
 
@@ -548,7 +508,7 @@ Likely fix:
 - Dedup via a key on `(rawKind, [childIDs])` *before* allocating the canonical
   node.
 
-### 16. `BinaryWriter.bytes` Doesn't Reserve Capacity
+### 15. `BinaryWriter.bytes` Doesn't Reserve Capacity
 
 **Severity:** Minor performance concern
 
@@ -571,7 +531,7 @@ Likely fix:
 - Call `bytes.reserveCapacity(estimatedSize)` once before the body of `encode`,
   with an estimate based on the known record/string counts.
 
-### 17. `RedArena.realizeChildNode` Slow Path Serializes On A Single Mutex
+### 16. `RedArena.realizeChildNode` Slow Path Serializes On A Single Mutex
 
 **Severity:** Performance concern (concurrent traversal)
 
@@ -594,7 +554,7 @@ Likely fix candidates:
 - Thread-local arena that periodically merges into shared state.
 - Benchmark first to confirm contention before changing the model.
 
-### 18. Recursive Traversal Risks Stack Overflow On Pathological Inputs
+### 17. Recursive Traversal Risks Stack Overflow On Pathological Inputs
 
 **Severity:** Robustness concern
 
