@@ -1,26 +1,89 @@
 import CambiumBuilder
 import CambiumCore
 
+/// Errors thrown by the green snapshot encoder and decoder.
+///
+/// Cambium's serialization format is intentionally strict: every length,
+/// every back-reference, every kind is validated at decode time. The
+/// errors below describe every distinct failure mode the validator can
+/// reject.
 public enum CambiumSerializationError: Error, Sendable, Equatable {
+    /// The input does not start with the Cambium green-snapshot magic
+    /// bytes. Either the input is not a Cambium snapshot, or it has been
+    /// corrupted/truncated at the very beginning.
     case badMagic
+
+    /// The format version recorded in the input is not the version this
+    /// build understands. Upgrade Cambium, or re-export the snapshot in a
+    /// supported format if your producer supports it.
     case unsupportedFormatVersion(UInt32)
+
+    /// The serialized language ID or version does not match the language
+    /// passed to the decoder. Indicates the snapshot was produced by a
+    /// different language or a different schema version.
     case languageMismatch(expectedID: String, foundID: String, expectedVersion: UInt32, foundVersion: UInt32)
+
+    /// The decoder ran out of input while reading a header, length, or
+    /// payload. The snapshot is incomplete.
     case truncatedInput
+
+    /// Trailing bytes remain after the decoder finished reading the root.
+    /// The snapshot is over-long; usually a producer bug or
+    /// concatenation accident.
     case trailingBytes(Int)
+
+    /// A string field was not valid UTF-8.
     case invalidUTF8
+
+    /// A length or count field exceeded the representable range.
     case integerOverflow
+
+    /// The root element ID points outside the records array.
     case invalidRootElementID(UInt32)
+
+    /// The element designated as the root is a token, not a node.
     case rootIsToken(UInt32)
+
+    /// A node record references a child element ID that does not exist
+    /// or appears later in the records array (records must be
+    /// topologically sorted).
     case invalidElementReference(UInt32)
+
+    /// A token record references a missing interned-text entry.
     case invalidTokenReference(UInt32)
+
+    /// A token record references a missing large-text entry.
     case invalidLargeTokenReference(UInt32)
+
+    /// An unknown record-type tag was encountered.
     case invalidRecordTag(UInt8)
+
+    /// An unknown text-storage tag was encountered inside a token record.
     case invalidTextStorageTag(UInt8)
+
+    /// The decoder encountered a raw kind the language does not
+    /// recognize. See `SyntaxLanguage.isKnown(_:)`.
     case unknownKind(RawSyntaxKind)
+
+    /// A token was tagged with `TokenTextStorage.staticText` but its
+    /// kind has no static text in the language.
     case staticTextUnavailable(kind: RawSyntaxKind)
+
+    /// A static-text token's declared length disagrees with its kind's
+    /// static text.
     case staticTextLengthMismatch(kind: RawSyntaxKind, expected: TextSize, actual: TextSize)
+
+    /// A dynamic-text token's declared length disagrees with the bytes
+    /// of the referenced text-table entry.
     case dynamicTextLengthMismatch(kind: RawSyntaxKind, expected: TextSize, actual: TextSize)
+
+    /// A node's declared length disagrees with the sum of its children's
+    /// lengths.
     case nodeLengthMismatch(kind: RawSyntaxKind, expected: TextSize, actual: TextSize)
+
+    /// A token or node's declared structural hash disagrees with the
+    /// hash recomputed from its contents. Indicates either a producer
+    /// bug or in-flight tampering.
     case hashMismatch(kind: RawSyntaxKind, expected: UInt64, actual: UInt64)
 }
 
@@ -326,10 +389,7 @@ private struct GreenSnapshotEncoder<Lang: SyntaxLanguage> {
 
     private func validateStaticTokenLength(_ token: GreenToken<Lang>) throws {
         guard let text = Lang.staticText(for: token.kind) else {
-            guard token.textLength == .zero else {
-                throw CambiumSerializationError.staticTextUnavailable(kind: token.rawKind)
-            }
-            return
+            throw CambiumSerializationError.staticTextUnavailable(kind: token.rawKind)
         }
 
         let actual = try staticTextLength(text)
@@ -441,6 +501,13 @@ private enum DecodedElementRecord {
 /// across reparses means the cache lineage is broken (either by this
 /// decoder or by a missing `result.intoCache()`).
 public enum GreenSnapshotDecoder {
+    /// Decode a Cambium green-snapshot byte sequence into a fresh
+    /// `SyntaxTree`. The decoded tree carries an immutable
+    /// `TokenTextSnapshot` resolver with a fresh
+    /// `TokenKeyNamespace`.
+    ///
+    /// Throws ``CambiumSerialization/CambiumSerializationError`` for any decode-time
+    /// validation failure.
     public static func decodeTree<Lang: SyntaxLanguage>(
         _ bytes: [UInt8],
         as language: Lang.Type = Lang.self
@@ -449,6 +516,10 @@ public enum GreenSnapshotDecoder {
         return snapshot.makeSyntaxTree()
     }
 
+    /// Decode a Cambium green-snapshot byte sequence into a copyable
+    /// `GreenTreeSnapshot`. Use when you want the raw `(root,
+    /// tokenText)` pair without immediately materializing a
+    /// `SyntaxTree`.
     public static func decodeSnapshot<Lang: SyntaxLanguage>(
         _ bytes: [UInt8],
         as language: Lang.Type = Lang.self
@@ -703,10 +774,7 @@ private struct GreenSnapshotDecodedTreeBuilder<Lang: SyntaxLanguage> {
     private func validateStaticTokenLength(rawKind: RawSyntaxKind, textLength: TextSize) throws {
         let kind = Lang.kind(for: rawKind)
         guard let text = Lang.staticText(for: kind) else {
-            guard textLength == .zero else {
-                throw CambiumSerializationError.staticTextUnavailable(kind: rawKind)
-            }
-            return
+            throw CambiumSerializationError.staticTextUnavailable(kind: rawKind)
         }
 
         let actual = try staticTextLength(text)
@@ -761,18 +829,24 @@ private func staticTextLength(_ text: StaticString) throws -> TextSize {
 }
 
 public extension SharedSyntaxTree {
+    /// Serialize this tree to a Cambium green-snapshot byte sequence.
+    /// Decode with ``CambiumSerialization/GreenSnapshotDecoder/decodeTree(_:as:)``.
     func serializeGreenSnapshot() throws -> [UInt8] {
         try encodeGreenSnapshot(root: rootGreen, resolver: resolver)
     }
 }
 
 public extension SyntaxTree {
+    /// Serialize this tree to a Cambium green-snapshot byte sequence.
+    /// Decode with ``CambiumSerialization/GreenSnapshotDecoder/decodeTree(_:as:)``.
     borrowing func serializeGreenSnapshot() throws -> [UInt8] {
         try encodeGreenSnapshot(root: rootGreen, resolver: resolver)
     }
 }
 
 public extension SyntaxNodeCursor {
+    /// Serialize this subtree to a Cambium green-snapshot byte sequence.
+    /// The decoded result is a standalone tree rooted at this subtree.
     borrowing func serializeGreenSubtree() throws -> [UInt8] {
         try green { node in
             try encodeGreenSnapshot(root: node, resolver: resolver)
@@ -781,6 +855,7 @@ public extension SyntaxNodeCursor {
 }
 
 public extension GreenTreeSnapshot {
+    /// Serialize this snapshot to a Cambium green-snapshot byte sequence.
     func serializeGreenSnapshot() throws -> [UInt8] {
         try encodeGreenSnapshot(root: root, resolver: tokenText)
     }

@@ -18,20 +18,30 @@ private enum BuilderIDGenerator {
     }
 }
 
-/// Caching policy for `GreenNodeCache`.
+/// Caching policy for ``CambiumBuilder/GreenNodeCache``.
 ///
-/// All policies cache tokens unconditionally when caching is enabled. Green
-/// nodes are subject to a fixed size threshold: nodes with more than three
-/// total children (matching cstree's default) bypass the cache and are
-/// returned without lookup or insertion. Wide nodes rarely recur
-/// structurally, and caching them tends to evict useful small entries while
-/// rarely paying off as a cache hit.
+/// All policies cache tokens unconditionally when caching is enabled.
+/// Green nodes are subject to a fixed size threshold: nodes with more than
+/// three total children (matching cstree's default) bypass the cache and
+/// are returned without lookup or insertion. Wide nodes rarely recur
+/// structurally, and caching them tends to evict useful small entries
+/// while rarely paying off as a cache hit.
 ///
-/// Eviction is deterministic FIFO across the union of token and node entries,
-/// triggered when the combined entry count would exceed `maxEntries`.
+/// Eviction is deterministic FIFO across the union of token and node
+/// entries, triggered when the combined entry count would exceed
+/// `maxEntries`.
+///
+/// Pick a policy based on the lifetime of the cache:
+///
+/// - One-off build, small-to-medium document: ``documentLocal``.
+/// - Long-lived editor session that reparses via incremental parsing:
+///   ``parseSession(maxEntries:)`` and carry the cache across builders
+///   with ``CambiumBuilder/GreenBuildResult/intoCache()``.
+/// - Multiple concurrent builders sharing a vocabulary:
+///   ``shared(maxEntries:)`` paired with ``CambiumBuilder/SharedGreenNodeCache``.
 public enum GreenCachePolicy: Sendable, Hashable {
     /// No caching. Every `makeToken` and `makeNode` call returns a fresh
-    /// allocation; `bypassCount` increments per call.
+    /// allocation; ``GreenNodeCache/bypassCount`` increments per call.
     case disabled
 
     /// Per-document cache fixed at 16,384 entries. Suitable for one-shot
@@ -39,12 +49,13 @@ public enum GreenCachePolicy: Sendable, Hashable {
     case documentLocal
 
     /// Parse-session cache with an explicit entry limit. Use this when
-    /// carrying the cache forward across reparses via `result.intoCache()`.
-    /// `maxEntries` must be positive; pass `.disabled` to opt out of caching.
+    /// carrying the cache forward across reparses via
+    /// ``CambiumBuilder/GreenBuildResult/intoCache()``. `maxEntries` must be positive;
+    /// pass ``disabled`` to opt out of caching.
     case parseSession(maxEntries: Int)
 
     /// Shared cache budget for cross-builder use (e.g. via
-    /// `SharedGreenNodeCache`). `maxEntries` must be positive.
+    /// ``CambiumBuilder/SharedGreenNodeCache``). `maxEntries` must be positive.
     case shared(maxEntries: Int)
 
     var maxEntries: Int {
@@ -66,9 +77,26 @@ final class LocalTokenInternerStorage: @unchecked Sendable {
     var largeText: [String] = []
 }
 
+/// A move-only, single-document token interner.
+///
+/// `LocalTokenInterner` deduplicates short token text within a single
+/// build. Its API surface (intern, store-large, snapshot) matches what
+/// ``CambiumBuilder/GreenTreeBuilder`` and ``CambiumBuilder/GreenNodeCache`` need — and in fact the
+/// builder owns the interner internally; you almost never need to
+/// construct one directly.
+///
+/// Use this type when you need to write a custom builder pipeline that
+/// participates in the same dedup contract as ``CambiumBuilder/GreenTreeBuilder``. For
+/// thread-safe interning shared across builders, use
+/// ``CambiumBuilder/SharedTokenInterner`` instead.
+///
+/// The interner is `~Copyable` to make ownership boundaries explicit. Take
+/// a snapshot with ``snapshot()`` to hand out an immutable
+/// `TokenTextSnapshot` resolver.
 public struct LocalTokenInterner: ~Copyable {
     private let storage: LocalTokenInternerStorage
 
+    /// Construct a fresh interner with its own `TokenKeyNamespace`.
     public init() {
         self.storage = LocalTokenInternerStorage()
     }
@@ -77,6 +105,8 @@ public struct LocalTokenInterner: ~Copyable {
         self.storage = storage
     }
 
+    /// Intern `text` and return its `TokenKey`. Repeated calls with the
+    /// same text return the same key.
     public mutating func intern(_ text: String) -> TokenKey {
         var copy = text
         return copy.withUTF8 { bytes in
@@ -84,6 +114,9 @@ public struct LocalTokenInterner: ~Copyable {
         }
     }
 
+    /// Intern a UTF-8 byte sequence and return its `TokenKey`. Validates
+    /// `bytes` as UTF-8 on first insertion; throws `TokenTextError.invalidUTF8`
+    /// for ill-formed input.
     public mutating func intern(_ bytes: UnsafeBufferPointer<UInt8>) throws -> TokenKey {
         let keyBytes = Array(bytes)
         if let key = storage.keysByText[keyBytes] {
@@ -109,12 +142,17 @@ public struct LocalTokenInterner: ~Copyable {
         return key
     }
 
+    /// Store `text` in the large-text table without interning, and return
+    /// its `LargeTokenTextID`. Use for unique payloads where
+    /// hash-interning would only waste hash work.
     public mutating func storeLargeText(_ text: String) -> LargeTokenTextID {
         let id = LargeTokenTextID(UInt32(storage.largeText.count))
         storage.largeText.append(text)
         return id
     }
 
+    /// Take an immutable snapshot of the interner's current contents,
+    /// suitable as a tree's resolver.
     public borrowing func snapshot() -> TokenTextSnapshot {
         TokenTextSnapshot(
             interned: storage.textByKey,
@@ -157,10 +195,20 @@ enum SharedTokenInternerKeyLayout {
 
 /// Thread-safe token interner with sharded storage.
 ///
-/// `TokenKey` values produced by this interner are runtime-local to this
-/// resolver. The current encoding uses the high 8 bits for the shard index and
-/// the low 24 bits for the per-shard local index, so at most 256 shards and
-/// 16,777,216 distinct token texts per shard are representable.
+/// `SharedTokenInterner` is a thread-safe interner/resolver for custom
+/// pipelines that concurrently intern from the same vocabulary (multiple
+/// parses of related files, background indexers running alongside
+/// foreground edits). ``CambiumBuilder/GreenTreeBuilder`` owns a local interner through
+/// ``CambiumBuilder/GreenNodeCache``; use this type when you are constructing green
+/// tokens yourself or otherwise need a shared `TokenResolver` outside
+/// the builder's local-cache lifecycle.
+///
+/// **Token-key layout.** `TokenKey` values produced by this interner are
+/// runtime-local. The current encoding uses the high 8 bits for the shard
+/// index and the low 24 bits for the per-shard local index, so at most
+/// 256 shards and 16,777,216 distinct token texts per shard are
+/// representable. Exhausting a shard traps; pick a shard count appropriate
+/// for the expected token vocabulary size.
 public final class SharedTokenInterner: TokenResolver, @unchecked Sendable {
     struct Shard {
         var keysByText: [[UInt8]: TokenKey] = [:]
@@ -168,8 +216,17 @@ public final class SharedTokenInterner: TokenResolver, @unchecked Sendable {
     }
 
     private let shards: [MutexBox<Shard>]
+
+    /// The namespace identity of this interner. Trees that resolve through
+    /// this interner share this namespace, so subtree reuse via
+    /// ``CambiumBuilder/GreenTreeBuilder/reuseSubtree(_:)`` can fast-path
+    /// (``CambiumBuilder/SubtreeReuseOutcome/direct``).
     public let tokenKeyNamespace: TokenKeyNamespace? = TokenKeyNamespace()
 
+    /// Construct a thread-safe interner with `shardCount` shards.
+    /// Default of 8 is appropriate for moderate concurrency; raise to
+    /// reduce contention on multi-core systems with many concurrent
+    /// builders.
     public init(shardCount: Int = 8) {
         precondition(shardCount > 0, "SharedTokenInterner requires at least one shard")
         precondition(
@@ -181,6 +238,8 @@ public final class SharedTokenInterner: TokenResolver, @unchecked Sendable {
         }
     }
 
+    /// Intern `text` and return its `TokenKey`. Repeated calls with the
+    /// same text return the same key. Thread-safe.
     public func intern(_ text: String) -> TokenKey {
         var copy = text
         return copy.withUTF8 { bytes in
@@ -188,6 +247,10 @@ public final class SharedTokenInterner: TokenResolver, @unchecked Sendable {
         }
     }
 
+    /// Intern a UTF-8 byte sequence and return its `TokenKey`. Validates
+    /// `bytes` as UTF-8 on first insertion; throws `TokenTextError.invalidUTF8`
+    /// for ill-formed input. Thread-safe.
+    ///
     /// Splits the lookup and the insert into two shard-mutex acquisitions so
     /// UTF-8 validation does not run under the lock. Validation is O(n) over
     /// `bytes`; holding the shard mutex through it would serialize every
@@ -377,13 +440,23 @@ final class GreenNodeCacheStorage<Lang: SyntaxLanguage>: @unchecked Sendable {
 /// Move-only green-node cache.
 ///
 /// Owns the token interner and dedupes recurring green nodes during build.
-/// Carry an instance forward across builders via `result.intoCache()` to
-/// preserve structural sharing and token-key namespace identity for
-/// incremental reparse. See `GreenCachePolicy` for caching rules and
-/// thresholds.
+/// Carry an instance forward across builders via
+/// ``CambiumBuilder/GreenBuildResult/intoCache()`` to preserve structural sharing and
+/// token-key namespace identity for incremental reparse. See
+/// ``CambiumBuilder/GreenCachePolicy`` for caching rules and thresholds.
+///
+/// The cache is `~Copyable` so its ownership is unambiguous: there is
+/// always exactly one owner of a given cache, and that owner can hand it
+/// off explicitly to another builder via `consume`.
+///
+/// **Counters.** ``hitCount``, ``missCount``, ``bypassCount``, and
+/// ``evictionCount`` summarize the cache's effectiveness. Inspect them
+/// in tests or telemetry to verify your incremental pipeline is
+/// preserving structural sharing as intended.
 public struct GreenNodeCache<Lang: SyntaxLanguage>: ~Copyable {
     fileprivate let storage: GreenNodeCacheStorage<Lang>
 
+    /// Construct a fresh cache. The default policy is ``CambiumBuilder/GreenCachePolicy/documentLocal``.
     public init(policy: GreenCachePolicy = .documentLocal) {
         self.storage = GreenNodeCacheStorage(policy: policy)
     }
@@ -392,6 +465,7 @@ public struct GreenNodeCache<Lang: SyntaxLanguage>: ~Copyable {
         self.storage = storage
     }
 
+    /// The caching policy in effect.
     public var policy: GreenCachePolicy {
         storage.policy
     }
@@ -420,16 +494,24 @@ public struct GreenNodeCache<Lang: SyntaxLanguage>: ~Copyable {
         storage.evictions
     }
 
+    /// Intern `text` and return its `TokenKey`. Equivalent to
+    /// ``LocalTokenInterner/intern(_:)-(String)`` against this cache's
+    /// owned interner.
     public mutating func intern(_ text: String) -> TokenKey {
         var interner = LocalTokenInterner(storage: storage.interner)
         return interner.intern(text)
     }
 
+    /// Intern UTF-8 bytes and return the `TokenKey`. See
+    /// ``LocalTokenInterner/intern(_:)-(UnsafeBufferPointer<UInt8>)``.
     public mutating func intern(_ bytes: UnsafeBufferPointer<UInt8>) throws -> TokenKey {
         var interner = LocalTokenInterner(storage: storage.interner)
         return try interner.intern(bytes)
     }
 
+    /// Store `text` in the large-text table without interning, and return
+    /// its `LargeTokenTextID`. Use for unique payloads where
+    /// hash-interning would only waste hash work.
     public mutating func storeLargeText(_ text: String) -> LargeTokenTextID {
         var interner = LocalTokenInterner(storage: storage.interner)
         return interner.storeLargeText(text)
@@ -509,9 +591,21 @@ public struct GreenNodeCache<Lang: SyntaxLanguage>: ~Copyable {
     }
 }
 
+/// A thread-safe, sharded ``CambiumBuilder/GreenNodeCache`` for cross-builder use.
+///
+/// `SharedGreenNodeCache` keeps a fixed number of cache shards behind
+/// mutexes, sharded by raw kind. Pass it to multiple concurrent builders
+/// when they should share dedup; each builder borrows its kind's shard
+/// inside ``withShard(for:_:)``.
+///
+/// For most workflows a single ``CambiumBuilder/GreenNodeCache`` carried forward across
+/// reparses is enough — reach for this type only when concurrent builders
+/// genuinely need to share storage.
 public final class SharedGreenNodeCache<Lang: SyntaxLanguage>: @unchecked Sendable {
     private let shards: [MutexBox<GreenNodeCacheStorage<Lang>>]
 
+    /// Construct a shared cache with `shardCount` shards, each subject to
+    /// `policy`.
     public init(policy: GreenCachePolicy = .shared(maxEntries: 16_384), shardCount: Int = 8) {
         precondition(shardCount > 0, "SharedGreenNodeCache requires at least one shard")
         self.shards = (0..<shardCount).map { _ in
@@ -519,6 +613,9 @@ public final class SharedGreenNodeCache<Lang: SyntaxLanguage>: @unchecked Sendab
         }
     }
 
+    /// Borrow the shard for `rawKind` under its mutex and run `body` with
+    /// a mutable ``CambiumBuilder/GreenNodeCache`` view. The cache is borrowed for the
+    /// duration of the closure; do not let it escape.
     public func withShard<R>(
         for rawKind: RawSyntaxKind,
         _ body: (inout GreenNodeCache<Lang>) throws -> R
@@ -531,6 +628,19 @@ public final class SharedGreenNodeCache<Lang: SyntaxLanguage>: @unchecked Sendab
     }
 }
 
+/// A snapshot of a ``CambiumBuilder/GreenTreeBuilder``'s state, captured by
+/// ``GreenTreeBuilder/checkpoint()`` so the builder can later "rewind" or
+/// retroactively wrap the children appended since the checkpoint.
+///
+/// Checkpoints make it possible to write a recursive-descent parser that
+/// commits to wrapping children inside a node only **after** seeing later
+/// tokens — for example, deciding to wrap a parsed integer inside an
+/// `Expr` node only once the parser sees a `+` follow-up. See
+/// ``GreenTreeBuilder/startNode(at:_:)`` and
+/// ``GreenTreeBuilder/revert(to:)``.
+///
+/// A checkpoint is bound to the builder that minted it. Using it against
+/// any other builder throws ``CambiumBuilder/GreenTreeBuilderError/invalidCheckpoint``.
 public struct BuilderCheckpoint: Sendable, Hashable {
     fileprivate let builderID: UInt64
     fileprivate let parentID: UInt64?
@@ -550,19 +660,48 @@ public struct BuilderCheckpoint: Sendable, Hashable {
     }
 }
 
+/// Errors thrown by ``CambiumBuilder/GreenTreeBuilder``.
 public enum GreenTreeBuilderError: Error, Sendable, Equatable {
+    /// ``CambiumBuilder/GreenTreeBuilder/finish()`` was called with `Int` open `startNode`
+    /// frames still on the stack. Indicates a missing
+    /// ``GreenTreeBuilder/finishNode()``.
     case unbalancedStartNodes(Int)
+
+    /// ``GreenTreeBuilder/finishNode()`` was called with no open frame.
     case finishWithoutNode
+
+    /// ``CambiumBuilder/GreenTreeBuilder/finish()`` was called with no children appended;
+    /// every tree must have a root node.
     case noRoot
+
+    /// ``CambiumBuilder/GreenTreeBuilder/finish()`` was called with multiple top-level
+    /// children. Wrap them in a single root node before finishing.
     case multipleRoots(Int)
+
+    /// A checkpoint was used against the wrong builder, or after the
+    /// builder's state moved past the checkpoint in a way that makes the
+    /// rewind incoherent (e.g., reverting to a checkpoint whose parent
+    /// frame has already been finished).
     case invalidCheckpoint
+
+    /// A path-based replacement helper traversed a child slot expected to
+    /// hold a node but found a token instead.
     case childIndexIsToken
+
+    /// ``CambiumBuilder/GreenTreeBuilder/staticToken(_:)`` was called with a kind whose
+    /// `SyntaxLanguage.staticText(for:)` is `nil`.
     case staticTextUnavailable(RawSyntaxKind)
+
+    /// A static-text token's bytes would not fit in a `TextSize`. Should
+    /// not arise in practice — static text is bounded.
     case staticTextLengthOverflow
-    /// Raised when `token(_:text:)` or `largeToken(_:text:)` is called with a
-    /// kind whose `Lang.staticText(for:)` is non-nil. Static-text kinds belong
-    /// on the `staticToken(_:)` path; the dynamic-text paths are reserved for
-    /// kinds that don't have grammar-determined text.
+
+    /// Raised when ``CambiumBuilder/GreenTreeBuilder/token(_:text:)`` or
+    /// ``CambiumBuilder/GreenTreeBuilder/largeToken(_:text:)`` is called with a kind
+    /// whose `SyntaxLanguage.staticText(for:)` is non-`nil`. Static-text
+    /// kinds belong on the ``CambiumBuilder/GreenTreeBuilder/staticToken(_:)`` path;
+    /// the dynamic-text paths are reserved for kinds that don't have
+    /// grammar-determined text.
     case staticKindRequiresStaticToken(RawSyntaxKind)
 }
 
@@ -574,19 +713,28 @@ struct OpenNode {
 
 /// Cacheless snapshot of a finished green tree.
 ///
-/// This is the copyable `root + token text` view of a tree. It is sufficient
-/// for rendering, serialization, and creating a `SyntaxTree`, but it does not
-/// carry the reusable builder cache needed for identity-preserving incremental
-/// reuse.
+/// `GreenTreeSnapshot` is the copyable `root + token text` view of a tree.
+/// It is sufficient for rendering, serialization
+/// (`SharedSyntaxTree.serializeGreenSnapshot()` and friends), and
+/// creating a `SyntaxTree` via ``makeSyntaxTree()``. It does not carry
+/// the reusable builder cache needed for identity-preserving incremental
+/// reuse — for that, hold onto a ``CambiumBuilder/GreenBuildResult`` and pass it
+/// through ``CambiumBuilder/GreenBuildResult/intoCache()``.
 public struct GreenTreeSnapshot<Lang: SyntaxLanguage>: Sendable {
+    /// The green root.
     public let root: GreenNode<Lang>
+
+    /// Immutable token text resolver that resolves every dynamic key in
+    /// `root`.
     public let tokenText: TokenTextSnapshot
 
+    /// Pair a green root with the token text it depends on.
     public init(root: GreenNode<Lang>, tokenText: TokenTextSnapshot) {
         self.root = root
         self.tokenText = tokenText
     }
 
+    /// Construct a fresh `SyntaxTree` from this snapshot.
     public func makeSyntaxTree() -> SyntaxTree<Lang> {
         SyntaxTree(root: root, resolver: tokenText)
     }
@@ -594,14 +742,33 @@ public struct GreenTreeSnapshot<Lang: SyntaxLanguage>: Sendable {
 
 /// Result of finishing a builder.
 ///
-/// The result includes the reusable cache so parse-session and incremental
-/// workflows naturally carry green storage and token-key namespace forward to
-/// the next builder.
+/// `GreenBuildResult` is the move-only return type of
+/// ``CambiumBuilder/GreenTreeBuilder/finish()``. It bundles the freshly built green
+/// root, an immutable `TokenTextSnapshot`, and the builder's cache.
+/// Carrying the cache forward into the next builder via ``intoCache()``
+/// is the key to identity-preserving incremental parsing.
+///
+/// ```swift
+/// let firstResult = try builder.finish()
+/// let firstTree = firstResult.snapshot.makeSyntaxTree()
+/// let cache = firstResult.intoCache()
+///
+/// // Later, for a reparse:
+/// var nextBuilder = GreenTreeBuilder<Calc>(cache: consume cache)
+/// // ...drive nextBuilder; reuseSubtree calls hit the fast path
+/// ```
 public struct GreenBuildResult<Lang: SyntaxLanguage>: ~Copyable {
+    /// The green root of the finished tree.
     public let root: GreenNode<Lang>
+
+    /// Immutable token text resolver covering every dynamic key in the
+    /// finished tree.
     public let tokenText: TokenTextSnapshot
+
     private var cache: GreenNodeCache<Lang>
 
+    /// Construct a result from explicit parts. Most code obtains a result
+    /// by calling ``CambiumBuilder/GreenTreeBuilder/finish()``.
     public init(
         root: GreenNode<Lang>,
         tokenText: TokenTextSnapshot,
@@ -612,14 +779,17 @@ public struct GreenBuildResult<Lang: SyntaxLanguage>: ~Copyable {
         self.cache = cache
     }
 
+    /// A copyable, cacheless view of `(root, tokenText)`. Equivalent to
+    /// constructing a ``CambiumBuilder/GreenTreeSnapshot`` by hand.
     public var snapshot: GreenTreeSnapshot<Lang> {
         GreenTreeSnapshot(root: root, tokenText: tokenText)
     }
 
     /// Consume this result and return the cache for the next builder.
     ///
-    /// Read `root`, `tokenText`, `snapshot`, or `makeSyntaxTree()` before calling
-    /// this method.
+    /// Read ``root``, ``tokenText``, ``snapshot``, or
+    /// `snapshot.makeSyntaxTree()` before calling this method — the
+    /// result is consumed.
     public consuming func intoCache() -> GreenNodeCache<Lang> {
         cache
     }
@@ -961,6 +1131,81 @@ struct ReusedSubtreeTokenRemapper<Lang: SyntaxLanguage> {
     }
 }
 
+/// The event-style builder used by parsers to construct a green tree.
+///
+/// `GreenTreeBuilder` follows cstree's event-stream shape: parsers tell
+/// the builder when to start a node, when to emit a token, and when to
+/// finish the open node. Behind the scenes the builder dedupes nodes and
+/// tokens through a ``CambiumBuilder/GreenNodeCache`` and accumulates children for the
+/// open frame.
+///
+/// ## Lifecycle
+///
+/// 1. Construct with ``init(policy:)`` (one-shot build) or
+///    ``init(cache:)`` (carry forward a cache from a prior parse to
+///    preserve structural sharing).
+/// 2. Drive the builder with ``startNode(_:)``, ``token(_:text:)``,
+///    ``staticToken(_:)``, ``finishNode()``, and friends.
+/// 3. Call ``finish()`` to consume the builder and return a
+///    ``CambiumBuilder/GreenBuildResult`` containing the green root, the token-text
+///    snapshot, and the cache (for the next reparse).
+///
+/// ## Token kinds
+///
+/// The builder enforces the static-vs-dynamic split. A kind whose
+/// `SyntaxLanguage.staticText(for:)` returns non-`nil` must use
+/// ``staticToken(_:)`` (or ``missingToken(_:)`` for an empty
+/// placeholder); a kind whose static text is `nil` must use
+/// ``token(_:text:)`` or ``largeToken(_:text:)``. Mixing them throws
+/// the corresponding ``CambiumBuilder/GreenTreeBuilderError``.
+///
+/// ## Checkpoints and retroactive wrapping
+///
+/// Parsers that don't yet know whether to wrap children in a node when
+/// they encounter the start of a construct can call ``checkpoint()`` to
+/// remember the current builder state, parse forward, and then wrap the
+/// new children retroactively with ``startNode(at:_:)``. Use
+/// ``revert(to:)`` to discard work after speculative parsing.
+///
+/// ## Subtree reuse for incremental parsing
+///
+/// ``reuseSubtree(_:)`` accepts a borrowed cursor from a prior tree and
+/// splices its green storage into the new tree. When the source tree's
+/// resolver shares this builder's namespace the splice is direct
+/// (``CambiumBuilder/SubtreeReuseOutcome/direct``); otherwise the subtree is
+/// re-interned and rebuilt (``CambiumBuilder/SubtreeReuseOutcome/remapped``). Carry
+/// the cache across parses with ``CambiumBuilder/GreenBuildResult/intoCache()`` to keep
+/// the namespace stable.
+///
+/// ## Topics
+///
+/// ### Constructing
+/// - ``init(cache:)``
+/// - ``init(policy:)``
+///
+/// ### Building structure
+/// - ``startNode(_:)``
+/// - ``startNode(rawKind:)``
+/// - ``finishNode()``
+/// - ``missingNode(_:)``
+///
+/// ### Emitting tokens
+/// - ``token(_:text:)``
+/// - ``token(_:bytes:)``
+/// - ``staticToken(_:)``
+/// - ``missingToken(_:)``
+/// - ``largeToken(_:text:)``
+///
+/// ### Checkpoints
+/// - ``checkpoint()``
+/// - ``startNode(at:_:)``
+/// - ``revert(to:)``
+///
+/// ### Subtree reuse
+/// - ``reuseSubtree(_:)``
+///
+/// ### Finishing
+/// - ``finish()``
 public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
     private let builderID: UInt64
     private let cacheStorage: GreenNodeCacheStorage<Lang>
@@ -969,6 +1214,9 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
     private var nextParentID: UInt64
     private var finished: Bool
 
+    /// Construct a builder that takes ownership of an existing cache.
+    /// Use this when you want to preserve structural sharing and token-key
+    /// namespace identity across a reparse.
     public init(cache: consuming GreenNodeCache<Lang>) {
         self.builderID = BuilderIDGenerator.make()
         self.cacheStorage = cache.takeStorage()
@@ -978,6 +1226,8 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
         self.finished = false
     }
 
+    /// Construct a builder with a fresh cache governed by `policy`.
+    /// Default policy is ``CambiumBuilder/GreenCachePolicy/documentLocal``.
     public init(policy: GreenCachePolicy = .documentLocal) {
         let cache = GreenNodeCacheStorage<Lang>(policy: policy)
         self.builderID = BuilderIDGenerator.make()
@@ -988,10 +1238,14 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
         self.finished = false
     }
 
+    /// Open a node of `kind` and start collecting its children.
     public mutating func startNode(_ kind: Lang.Kind) {
         startNode(rawKind: Lang.rawKind(for: kind))
     }
 
+    /// Open a node of `rawKind`. Equivalent to ``startNode(_:)`` but
+    /// avoids the typed-kind round-trip, useful for language-agnostic
+    /// builders.
     public mutating func startNode(rawKind: RawSyntaxKind) {
         precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
         parents.append(OpenNode(
@@ -1001,6 +1255,12 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
         ))
     }
 
+    /// Close the most recently opened node, gathering its accumulated
+    /// children and inserting it as a child of the next-outer node (or as
+    /// the root if it was the top-level frame).
+    ///
+    /// Throws ``CambiumBuilder/GreenTreeBuilderError/finishWithoutNode`` if no frame is
+    /// currently open.
     public mutating func finishNode() throws {
         precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
         guard let parent = parents.popLast() else {
@@ -1015,6 +1275,9 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
         children.append(.node(node))
     }
 
+    /// Append a dynamic-text token of `kind` with the given source `text`.
+    /// Throws ``CambiumBuilder/GreenTreeBuilderError/staticKindRequiresStaticToken(_:)``
+    /// if the kind has static text.
     public mutating func token(_ kind: Lang.Kind, text: String) throws {
         var copy = text
         try copy.withUTF8 { bytes in
@@ -1022,6 +1285,9 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
         }
     }
 
+    /// Append a dynamic-text token from raw UTF-8 bytes. Validates the
+    /// bytes as UTF-8 on first interning; throws
+    /// `TokenTextError.invalidUTF8` for ill-formed input.
     public mutating func token(_ kind: Lang.Kind, bytes: UnsafeBufferPointer<UInt8>) throws {
         precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
         if Lang.staticText(for: kind) != nil {
@@ -1038,6 +1304,12 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
         )))
     }
 
+    /// Append a large-text token of `kind` with the given source `text`.
+    /// Routes through the large-text storage path instead of the interned
+    /// pool. Use for inherently unique payloads (long string literals,
+    /// raw text blocks) where interning would not pay off. Throws
+    /// ``CambiumBuilder/GreenTreeBuilderError/staticKindRequiresStaticToken(_:)`` if the
+    /// kind has static text.
     public mutating func largeToken(_ kind: Lang.Kind, text: String) throws {
         precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
         if Lang.staticText(for: kind) != nil {
@@ -1054,6 +1326,10 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
         )))
     }
 
+    /// Append a static-text token of `kind`. The text comes from
+    /// `SyntaxLanguage.staticText(for:)`; throws
+    /// ``CambiumBuilder/GreenTreeBuilderError/staticTextUnavailable(_:)`` for kinds with
+    /// no static text.
     public mutating func staticToken(_ kind: Lang.Kind) throws {
         precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
         guard let text = Lang.staticText(for: kind) else {
@@ -1078,6 +1354,10 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
         )))
     }
 
+    /// Append a "missing" token of `kind`. Renders as an empty span
+    /// regardless of the kind's static or dynamic text. Use to record
+    /// parser-recovered placeholders (an expected operator that was not
+    /// in the source).
     public mutating func missingToken(_ kind: Lang.Kind) {
         precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
         var cache = GreenNodeCache<Lang>(storage: cacheStorage)
@@ -1088,12 +1368,18 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
         )))
     }
 
+    /// Append an empty "missing" node of `kind`. The node has no children
+    /// and zero text length. Use to record parser-recovered placeholders
+    /// where a structural element was expected but not present.
     public mutating func missingNode(_ kind: Lang.Kind) throws {
         precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
         var cache = GreenNodeCache<Lang>(storage: cacheStorage)
         children.append(.node(try cache.makeNode(kind: Lang.rawKind(for: kind), children: [])))
     }
 
+    /// Capture a snapshot of the builder's current state for later use
+    /// with ``startNode(at:_:)`` or ``revert(to:)``. See
+    /// ``CambiumBuilder/BuilderCheckpoint`` for the use case.
     public mutating func checkpoint() -> BuilderCheckpoint {
         precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
         return BuilderCheckpoint(
@@ -1104,6 +1390,14 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
         )
     }
 
+    /// Retroactively wrap every child appended since `checkpoint` inside
+    /// a new node of `kind`. After this call, the builder's open frame
+    /// is the new node and any children appended between the checkpoint
+    /// and now have become children of the new node.
+    ///
+    /// Throws ``CambiumBuilder/GreenTreeBuilderError/invalidCheckpoint`` if the
+    /// checkpoint is from a different builder or is incoherent with the
+    /// current state.
     public mutating func startNode(at checkpoint: BuilderCheckpoint, _ kind: Lang.Kind) throws {
         precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
         try validateStartNodeCheckpoint(checkpoint)
@@ -1117,6 +1411,10 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
         children.append(contentsOf: wrapped)
     }
 
+    /// Discard every change made since `checkpoint` was captured. Useful
+    /// for backtracking after speculative parsing. Throws
+    /// ``CambiumBuilder/GreenTreeBuilderError/invalidCheckpoint`` if the checkpoint is
+    /// not from this builder or is incoherent.
     public mutating func revert(to checkpoint: BuilderCheckpoint) throws {
         precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
         try validateRevertCheckpoint(checkpoint)
@@ -1165,11 +1463,18 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
         return .remapped
     }
 
-    /// Finish the tree and return the builder's reusable cache.
+    /// Finish the tree and return a ``CambiumBuilder/GreenBuildResult`` carrying the
+    /// green root, an immutable token-text snapshot, and the builder's
+    /// reusable cache.
     ///
     /// The returned cache carries both green-node cache contents and the
-    /// token-key namespace needed for identity-preserving `reuseSubtree` in a
-    /// later builder.
+    /// token-key namespace needed for identity-preserving
+    /// ``reuseSubtree(_:)`` in a later builder. Throws if the open-frame
+    /// stack is not empty
+    /// (``CambiumBuilder/GreenTreeBuilderError/unbalancedStartNodes(_:)``), no children
+    /// were appended (``CambiumBuilder/GreenTreeBuilderError/noRoot``), or multiple
+    /// top-level children were appended
+    /// (``CambiumBuilder/GreenTreeBuilderError/multipleRoots(_:)``).
     public consuming func finish() throws -> GreenBuildResult<Lang> {
         let root = try finishRoot()
         let interner = LocalTokenInterner(storage: cacheStorage.interner)

@@ -1,24 +1,69 @@
+/// A streaming sink for UTF-8 byte chunks.
+///
+/// `UTF8Sink` is the abstraction `GreenNode.writeText(to:using:)` and
+/// ``CambiumCore/SyntaxText/writeUTF8(to:)`` use to emit text without committing to a
+/// single output type. Implement it to write into a file, network buffer,
+/// hash, or any other UTF-8-consuming target. ``CambiumCore/StringUTF8Sink`` is the
+/// bundled allocating implementation.
 public protocol UTF8Sink {
+    /// Append `bytes` to the sink. Implementations may buffer or write
+    /// through directly; the only requirement is that calls are processed
+    /// in order.
     mutating func write(_ bytes: UnsafeBufferPointer<UInt8>) throws
 }
 
+/// A ``CambiumCore/UTF8Sink`` that accumulates bytes into a `String`.
+///
+/// Useful for materializing text from a tree when you want a `String` at
+/// the end. For incremental output (writing to a file, computing a hash),
+/// implement ``CambiumCore/UTF8Sink`` directly to avoid building an intermediate
+/// string.
 public struct StringUTF8Sink: UTF8Sink {
+    /// The accumulated string built so far.
     public private(set) var result: String
 
+    /// Construct an empty sink.
     public init() {
         self.result = ""
     }
 
+    /// Append `bytes` (decoded as UTF-8) to ``result``.
     public mutating func write(_ bytes: UnsafeBufferPointer<UInt8>) throws {
         result += String(decoding: bytes, as: UTF8.self)
     }
 }
 
+/// A non-allocating, borrowed view over a contiguous UTF-8 byte range
+/// inside a green subtree.
+///
+/// `SyntaxText` lets you scan source text — searching for bytes or byte
+/// sequences, comparing for equality, slicing, streaming — without
+/// materializing a `String`. Internally it walks the green tree on demand,
+/// yielding chunks that point straight at the resolver's interned bytes
+/// or at static-text storage; nothing is copied or allocated unless you
+/// explicitly call ``makeString()``.
+///
+/// Obtain a `SyntaxText` via ``SyntaxNodeCursor/withText(_:)``:
+///
+/// ```swift
+/// tree.withRoot { root in
+///     root.withText { text in
+///         if text.contains(0x2B) {  // '+'
+///             // ...
+///         }
+///     }
+/// }
+/// ```
+///
+/// `SyntaxText` is `~Copyable` and is meant to live entirely inside the
+/// borrow scope. Slice it with ``sliced(_:)`` to drill into a sub-range.
 public struct SyntaxText<Lang: SyntaxLanguage>: ~Copyable {
     private let root: GreenNode<Lang>
     private let resolver: any TokenResolver
     private let range: TextRange
 
+    /// Construct a view over the entire text of `root`, resolving any
+    /// dynamic token keys through `resolver`.
     public init(root: GreenNode<Lang>, resolver: any TokenResolver) {
         self.root = root
         self.resolver = resolver
@@ -31,20 +76,29 @@ public struct SyntaxText<Lang: SyntaxLanguage>: ~Copyable {
         self.range = range
     }
 
+    /// The byte length of the visible range.
     public var utf8Count: Int {
         Int(range.length.rawValue)
     }
 
+    /// Whether the visible range is empty.
     public var isEmpty: Bool {
         range.isEmpty
     }
 
+    /// Stream every byte in the visible range into `sink`. No allocation.
     public borrowing func writeUTF8<Sink: UTF8Sink>(to sink: inout Sink) throws {
         try forEachUTF8Chunk { bytes in
             try sink.write(bytes)
         }
     }
 
+    /// Call `body` for each contiguous UTF-8 byte chunk in the visible
+    /// range, in source order. The buffer is valid only for the duration
+    /// of each call; do not let it escape `body`.
+    ///
+    /// Throwing from `body` propagates. To stop iteration early without
+    /// signalling an error, throw a sentinel and catch it outside.
     public borrowing func forEachUTF8Chunk(
         _ body: (UnsafeBufferPointer<UInt8>) throws -> Void
     ) throws {
@@ -60,14 +114,19 @@ public struct SyntaxText<Lang: SyntaxLanguage>: ~Copyable {
         )
     }
 
+    /// Whether `byte` appears anywhere in the visible range.
     public borrowing func contains(_ byte: UInt8) -> Bool {
         firstIndex(of: byte) != nil
     }
 
+    /// Whether the byte sequence `needle` appears anywhere in the visible
+    /// range. Empty needles always match.
     public borrowing func contains(_ needle: [UInt8]) -> Bool {
         firstRange(of: needle) != nil
     }
 
+    /// The byte offset (relative to the visible range's start) of the first
+    /// occurrence of `byte`, or `nil` if `byte` does not appear.
     public borrowing func firstIndex(of byte: UInt8) -> TextSize? {
         var offset = 0
         var result: TextSize?
@@ -90,6 +149,10 @@ public struct SyntaxText<Lang: SyntaxLanguage>: ~Copyable {
         return result
     }
 
+    /// The byte range (relative to the visible range's start) of the first
+    /// occurrence of `needle`, or `nil` if `needle` does not appear. Uses a
+    /// KMP-style scan, so each byte of input is examined at most a constant
+    /// number of times.
     public borrowing func firstRange(of needle: [UInt8]) -> TextRange? {
         if needle.isEmpty {
             return TextRange(start: .zero, length: .zero)
@@ -139,6 +202,9 @@ public struct SyntaxText<Lang: SyntaxLanguage>: ~Copyable {
         return result
     }
 
+    /// A `SyntaxText` view restricted to `sliceRange` (interpreted relative
+    /// to this view's start). Traps if `sliceRange` is not contained in the
+    /// current visible range.
     public borrowing func sliced(_ sliceRange: TextRange) -> SyntaxText<Lang> {
         let bounds = TextRange(start: .zero, length: range.length)
         precondition(bounds.contains(sliceRange), "SyntaxText slice range out of bounds")
@@ -149,6 +215,8 @@ public struct SyntaxText<Lang: SyntaxLanguage>: ~Copyable {
         )
     }
 
+    /// Whether the visible range is byte-for-byte equal to `string`'s
+    /// UTF-8 encoding.
     public borrowing func equals(_ string: String) -> Bool {
         guard string.utf8.count == utf8Count else {
             return false
@@ -165,6 +233,7 @@ public struct SyntaxText<Lang: SyntaxLanguage>: ~Copyable {
         }
     }
 
+    /// Whether two `SyntaxText` views are byte-for-byte equal.
     public borrowing func equals(_ other: borrowing SyntaxText<Lang>) -> Bool {
         guard utf8Count == other.utf8Count else {
             return false
@@ -198,6 +267,8 @@ public struct SyntaxText<Lang: SyntaxLanguage>: ~Copyable {
         return equal
     }
 
+    /// Consume the view and return its bytes as a `String`. Allocates.
+    /// Prefer ``forEachUTF8Chunk(_:)`` when you can stream the bytes.
     public consuming func makeString() -> String {
         var sink = StringUTF8Sink()
         do {

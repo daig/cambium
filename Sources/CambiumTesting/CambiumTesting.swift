@@ -1,5 +1,7 @@
 import CambiumCore
 
+/// Trap if `element`'s `GreenElement.textLength` is not exactly
+/// `expected`. Test-support helper.
 public func assertTextLength<Lang: SyntaxLanguage>(
     _ element: GreenElement<Lang>,
     equals expected: TextSize,
@@ -14,6 +16,8 @@ public func assertTextLength<Lang: SyntaxLanguage>(
     )
 }
 
+/// Trap if rendering `tree`'s root text does not produce `expected`.
+/// Test-support helper for confirming a parse round-trips losslessly.
 public func assertRoundTrip<Lang: SyntaxLanguage>(
     _ tree: SharedSyntaxTree<Lang>,
     equals expected: String,
@@ -31,6 +35,12 @@ public func assertRoundTrip<Lang: SyntaxLanguage>(
     )
 }
 
+/// Render `tree` as a multi-line indented string showing each node's kind
+/// name and text range. Useful for tests, REPL exploration, and
+/// debugging.
+///
+/// Tokens are not included in the output; for a token-aware view, walk
+/// the tree directly with `SyntaxNodeCursor.walkPreorderWithTokens(_:)`.
 public func debugTree<Lang: SyntaxLanguage>(_ tree: SharedSyntaxTree<Lang>) -> String {
     tree.withRoot { root in
         var lines: [String] = []

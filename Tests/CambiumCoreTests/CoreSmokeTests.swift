@@ -620,6 +620,65 @@ private func describeElementWalkEvent(_ event: borrowing SyntaxElementWalkEvent<
     ])
 }
 
+@Test func mutableRootCursorSupportsMoveToNavigation() throws {
+    let tree = try makeTraversalTree()
+    let labels = tree.withMutableRoot { cursor in
+        var labels: [String] = []
+        labels.append(cursor.makeString())
+        labels.append(cursor.moveToFirstChild() ? cursor.makeString() : "nil")
+        labels.append(cursor.moveToNextSibling() ? cursor.makeString() : "nil")
+        labels.append(cursor.moveToPreviousSibling() ? cursor.makeString() : "nil")
+        labels.append(cursor.moveToParent() ? cursor.makeString() : "nil")
+        labels.append(cursor.moveToLastChild() ? cursor.makeString() : "nil")
+        return labels
+    }
+
+    #expect(labels == [
+        "a b c + d + e + f z",
+        "b c + d + e",
+        "f",
+        "b c + d + e",
+        "a b c + d + e + f z",
+        "f",
+    ])
+
+    let shared = tree.share()
+    let lastViaHandle = shared.rootHandle().withMutableCursor { cursor in
+        cursor.moveToLastChild() ? cursor.makeString() : "nil"
+    }
+    #expect(lastViaHandle == "f")
+}
+
+@Test func ownedTraversalDescendantsExcludeSelfAndRootHelperIncludesRoot() throws {
+    let shared = try makeTraversalTree().share()
+    let root = shared.rootHandle()
+
+    let descendants = root.descendantHandlesPreorder.map { handle in
+        handle.withCursor { cursor in
+            cursor.makeString()
+        }
+    }
+    #expect(descendants == [
+        "b c + d + e",
+        "c + d",
+        "e",
+        "f",
+    ])
+
+    let rootAndDescendants = shared.rootAndDescendantHandlesPreorder.map { handle in
+        handle.withCursor { cursor in
+            cursor.makeString()
+        }
+    }
+    #expect(rootAndDescendants == [
+        "a b c + d + e + f z",
+        "b c + d + e",
+        "c + d",
+        "e",
+        "f",
+    ])
+}
+
 @Test func traversalSiblingAPIsSkipOrIncludeTokens() throws {
     let tree = try makeTraversalTree()
     let labels = tree.withRoot { root in
@@ -1218,6 +1277,22 @@ private enum ListSpec: TypedSyntaxNode {
         actual: 1
     )) {
         _ = try GreenSnapshotDecoder.decodeTree(bytes, as: TestLanguage.self)
+    }
+}
+
+@Test func serializationRejectsStaticTextStorageForDynamicKind() throws {
+    let malformed = GreenToken<TestLanguage>(
+        kind: .identifier,
+        textLength: .zero,
+        text: .staticText
+    )
+    let root = try GreenNode<TestLanguage>(kind: .root, children: [.token(malformed)])
+    let tree = SyntaxTree(root: root)
+
+    #expect(throws: CambiumSerializationError.staticTextUnavailable(
+        kind: RawSyntaxKind(TestKind.identifier.rawValue)
+    )) {
+        _ = try tree.serializeGreenSnapshot()
     }
 }
 

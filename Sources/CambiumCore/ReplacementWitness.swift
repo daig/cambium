@@ -1,21 +1,63 @@
-/// A pure structural description of a single-subtree replacement applied via
-/// `SharedSyntaxTree.replacing(handle:with:cache:)`.
+/// A pure structural description of a single-subtree replacement applied
+/// via `SharedSyntaxTree.replacing(_:with:cache:)`.
 ///
-/// Witnesses are version-spanning primitives: they describe what changed, in
-/// vocabulary that's stable across tree versions (green nodes, paths, ranges).
-/// They contain no resolution logic and impose no policy. Cross-tree identity
-/// trackers consume witnesses to translate v0 references into v1.
+/// Witnesses are version-spanning primitives: they describe what changed,
+/// in vocabulary that's stable across tree versions (green nodes, paths,
+/// ranges). They contain no resolution logic and impose no policy.
+/// Cross-tree identity trackers consume witnesses to translate v0
+/// references into v1.
 ///
-/// Same-tree token resolution concerns (for example, an overlay resolver used
-/// when replacement token keys cannot be remapped into the target namespace)
-/// are not part of the witness; they travel via the returned `SyntaxTree`.
+/// Same-tree token resolution concerns (for example, an overlay resolver
+/// used when replacement token keys cannot be remapped into the target
+/// namespace) are not part of the witness; they travel via the returned
+/// ``CambiumCore/SyntaxTree``.
+///
+/// ## Translating v0 references through a witness
+///
+/// For a v0 reference whose ``CambiumCore/SyntaxNodeCursor/childIndexPath()`` is
+/// `path`, call ``classify(path:)`` and act on the
+/// ``CambiumCore/ReplacementOutcome``:
+///
+/// ```swift
+/// let result = try old.replacing(handle, with: replacement, cache: &cache)
+/// let witness = result.witness
+/// let v1 = result.intoTree()
+///
+/// switch witness.classify(path: anchorPath) {
+/// case .unchanged:
+///     // path still refers to the same node in v1
+/// case .ancestor:
+///     // path's ancestor still exists; some descendant changed
+/// case .replacedRoot(let newSubtree):
+///     // the node *was* the replaced subtree; newSubtree is the new value
+/// case .deleted:
+///     // path pointed inside the replaced subtree — that node is gone
+/// }
+/// ```
 public struct ReplacementWitness<Lang: SyntaxLanguage>: Sendable {
+    /// The green root of the tree before the replacement.
     public let oldRoot: GreenNode<Lang>
+
+    /// The green root of the tree after the replacement.
     public let newRoot: GreenNode<Lang>
+
+    /// The green child-slot path from `oldRoot` to the replaced subtree
+    /// (and from `newRoot` to its replacement). Each index is a position
+    /// in the parent's full child list.
     public let replacedPath: SyntaxNodePath
+
+    /// The subtree that was at `replacedPath` before the replacement.
     public let oldSubtree: GreenNode<Lang>
+
+    /// The subtree that is at `replacedPath` after the replacement. Equal
+    /// to `oldSubtree` (by ``CambiumCore/GreenNodeIdentity``) for no-op replacements;
+    /// `classify(path:)` short-circuits all paths to ``CambiumCore/ReplacementOutcome/unchanged``
+    /// in that case.
     public let newSubtree: GreenNode<Lang>
 
+    /// Construct a witness from its parts. Most code obtains witnesses
+    /// from ``CambiumCore/ReplacementResult/witness`` rather than building them
+    /// directly.
     public init(
         oldRoot: GreenNode<Lang>,
         newRoot: GreenNode<Lang>,
@@ -58,14 +100,14 @@ public enum ReplacementOutcome<Lang: SyntaxLanguage>: Sendable {
 }
 
 public extension ReplacementWitness {
-    /// Classify a v0 path against this witness. Use the returned outcome to
-    /// decide how to translate any v0 reference whose path is `path`.
+    /// Classify a v0 path against this witness. Use the returned outcome
+    /// to decide how to translate any v0 reference whose path is `path`.
     ///
     /// If the replacement was a no-op (`oldSubtree` and `newSubtree` share
-    /// the same green storage), every path classifies as `.unchanged` —
-    /// including paths at and under `replacedPath`. This short-circuit
-    /// preserves the guarantee that identity-equal subtrees mean "no
-    /// logical change."
+    /// the same green storage), every path classifies as
+    /// ``CambiumCore/ReplacementOutcome/unchanged`` — including paths at and under
+    /// `replacedPath`. This short-circuit preserves the guarantee that
+    /// identity-equal subtrees mean "no logical change."
     func classify(path: SyntaxNodePath) -> ReplacementOutcome<Lang> {
         if oldSubtree.identity == newSubtree.identity {
             return .unchanged
