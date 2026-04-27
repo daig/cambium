@@ -1029,10 +1029,12 @@ Point/range lookup:
 
 ```swift
 extension SyntaxNodeCursor {
-    public borrowing func withToken<R>(
-        at offset: TextSize,
-        _ body: (borrowing SyntaxTokenCursor<Lang>) throws -> R
-    ) rethrows -> R?
+    public borrowing func withTokenAtOffset<R>(
+        _ offset: TextSize,
+        none: () throws -> R,
+        single: (borrowing SyntaxTokenCursor<Lang>) throws -> R,
+        between: (borrowing SyntaxTokenCursor<Lang>, borrowing SyntaxTokenCursor<Lang>) throws -> R
+    ) rethrows -> R
 
     public borrowing func withCoveringElement<R>(
         _ range: TextRange,
@@ -1040,6 +1042,15 @@ extension SyntaxNodeCursor {
     ) rethrows -> R?
 }
 ```
+
+The three-closure shape on `withTokenAtOffset` distinguishes the
+boundary case (`between`) from a single-token match (`single`) and an
+out-of-range query (`none`). A zero-length token at the offset takes
+precedence and surfaces as `single`. The closure-callback shape is a
+workaround for a Swift compiler bug affecting pattern-matching of
+multi-payload `~Copyable` enum cases; the natural enum shape is
+documented in the source and should be revisited once the bug is
+fixed.
 
 Explicit ownership conversions:
 
@@ -1345,7 +1356,10 @@ provides range lookup, green reuse, structural hashing, and cache reuse.
 Text to tree:
 
 ```swift
-root.withToken(at: offset) { token in ... }
+root.withTokenAtOffset(offset,
+    none: { ... },
+    single: { token in ... },
+    between: { left, right in ... })
 root.withCoveringElement(range) { element in ... }
 root.tokens(in: visibleRange) { token in ... }
 ```

@@ -421,6 +421,39 @@ public enum SyntaxElementWalkEvent<Lang: SyntaxLanguage>: ~Copyable {
     case leave(SyntaxElementCursor<Lang>)
 }
 
+// NOTE: The natural shape for the token-at-offset API would be a `~Copyable`
+// enum:
+//
+//     public enum TokenAtOffset<Lang>: ~Copyable {
+//         case none
+//         case single(SyntaxTokenCursor<Lang>)
+//         case between(left: SyntaxTokenCursor<Lang>, right: SyntaxTokenCursor<Lang>)
+//     }
+//
+// SE-0432 says this should work, and SyntaxNodeWalkEvent already uses the
+// single-payload form. But pattern-matching the multi-payload `.between` case
+// (`case .between(let left, let right)`) currently triggers a Swift compiler
+// error: "copy of noncopyable typed value. This is a compiler bug." It's a
+// known family of bugs against `~Copyable` codegen, with no documented fix-in
+// version. Tracking links:
+//   - https://forums.swift.org/t/copy-of-noncopyable-typed-value-bug/84873
+//   - https://forums.swift.org/t/copy-of-non-copyable-typed-value/75842
+// As a workaround we expose the three cases via three explicit closures
+// (`none`, `single`, `between`) on `withTokenAtOffset(_:none:single:between:)`
+// — function parameters with multiple `~Copyable` values work fine, only the
+// pattern-binding path breaks. Revisit and switch to the enum form once the
+// compiler bug is fixed.
+
+/// Captures everything needed to construct a `SyntaxTokenCursor` for a
+/// found token, without paying the cursor construction cost during the
+/// recursive walk. Internal helper for `withTokenAtOffset`.
+private struct TokenLocation<Lang: SyntaxLanguage> {
+    let parentRecord: RedNodeRecord<Lang>
+    let childIndex: UInt32
+    let offset: TextSize
+    let green: GreenToken<Lang>
+}
+
 public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
     private let storageRef: Unmanaged<SyntaxTreeStorage<Lang>>
     private var recordRef: Unmanaged<RedNodeRecord<Lang>>
@@ -1329,10 +1362,100 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
         }
     }
 
-    public borrowing func withToken<R>(
-        at offset: TextSize,
-        _ body: (borrowing SyntaxTokenCursor<Lang>) throws -> R
-    ) rethrows -> R? {
+    /// Find the token(s) at `offset` in this subtree.
+    ///
+    /// Exactly one of `none`, `single`, or `between` is invoked, and its
+    /// return value is returned from this method:
+    ///
+    /// - `none` runs when the offset is outside the subtree's range or the
+    ///   subtree has no tokens.
+    /// - `single` runs when one token is "at" the offset: the offset is
+    ///   strictly inside a token, or sits at the very start of the first
+    ///   token (no left neighbor), or at the very end of the last token
+    ///   (no right neighbor), or a zero-length token sits at that exact
+    ///   offset (taking precedence over any non-zero neighbors).
+    /// - `between` runs when the offset lies exactly between two
+    ///   non-zero-length tokens, with `left.textRange.end == offset ==
+    ///   right.textRange.start`.
+    ///
+    /// The three-closure shape is a workaround for a Swift compiler bug
+    /// affecting pattern-matching of multi-payload `~Copyable` enum cases;
+    /// see the `TokenLocation` comment block above for context. When that
+    /// bug is fixed this should become a single body taking a
+    /// `TokenAtOffset<Lang>: ~Copyable` enum.
+    public borrowing func withTokenAtOffset<R>(
+        _ offset: TextSize,
+        none: () throws -> R,
+        single: (borrowing SyntaxTokenCursor<Lang>) throws -> R,
+        between: (borrowing SyntaxTokenCursor<Lang>, borrowing SyntaxTokenCursor<Lang>) throws -> R
+    ) rethrows -> R {
+        guard textRange.containsAllowingEnd(offset) else {
+            return try none()
+        }
+
+        let right = findTokenLocation(at: offset)
+        let left: TokenLocation<Lang>? = offset > .zero
+            ? findTokenLocation(at: offset - TextSize(1))
+            : nil
+
+        switch (left, right) {
+        case (nil, nil):
+            return try none()
+
+        case (nil, let r?):
+            let cursor = makeTokenCursor(from: r)
+            return try single(cursor)
+
+        case (let l?, nil):
+            let cursor = makeTokenCursor(from: l)
+            return try single(cursor)
+
+        case (let l?, let r?):
+            // A zero-length token at offset wins over any boundary classification.
+            if r.green.textLength == .zero {
+                let cursor = makeTokenCursor(from: r)
+                return try single(cursor)
+            }
+            // Same token: strictly inside one token (left and right both fell
+            // into the same token).
+            if l.parentRecord === r.parentRecord && l.childIndex == r.childIndex {
+                let cursor = makeTokenCursor(from: r)
+                return try single(cursor)
+            }
+            // Different tokens. Boundary case requires left.end == offset == right.start.
+            let leftEnd = l.offset + l.green.textLength
+            if leftEnd == offset && r.offset == offset {
+                let leftCursor = makeTokenCursor(from: l)
+                let rightCursor = makeTokenCursor(from: r)
+                return try between(leftCursor, rightCursor)
+            }
+            // Otherwise we're inside `right` (right.start < offset); `left` was
+            // an adjacent token at offset-1 that doesn't share a boundary at
+            // offset. Defensive — shouldn't arise in well-formed trees.
+            let cursor = makeTokenCursor(from: r)
+            return try single(cursor)
+        }
+    }
+
+    /// Depth-first search for a token at `offset`. Returns the first matching
+    /// token in iteration order, descending into node children that may
+    /// contain a deeper match. Right-leaning at boundaries by virtue of
+    /// iteration order; zero-length tokens at the offset always win.
+    ///
+    /// **Why nodes and tokens use different containment checks** — node
+    /// descent uses `containsAllowingEnd` (the offset can equal the
+    /// child's `end`), while token matching uses strict `contains` plus
+    /// an explicit zero-length-at-offset clause. A non-zero-length token
+    /// whose range ends at `offset` does not actually contain `offset`,
+    /// so it is not a match. But that token's parent node's range *also*
+    /// ends at `offset`, and a zero-length token may sit at the parent's
+    /// right boundary as a sibling of the non-zero token. The asymmetry
+    /// is what lets us descend into the parent and find that zero-length
+    /// descendant; without it, lookup would fall through to the next
+    /// top-level sibling and miss the nested zero-length match. If you
+    /// simplify both branches to use the same check you will reintroduce
+    /// the regression covered by `tokenAtOffsetFindsNestedZeroLengthTokenAtChildEnd`.
+    private borrowing func findTokenLocation(at offset: TextSize) -> TokenLocation<Lang>? {
         guard textRange.containsAllowingEnd(offset) else {
             return nil
         }
@@ -1346,14 +1469,12 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
             defer {
                 childStart = childStart + child.textLength
             }
-            let contains = childRange.contains(offset)
-                || (childRange.isEmpty && childRange.start == offset)
-            guard contains else {
-                continue
-            }
 
             switch child {
             case .node:
+                guard childRange.containsAllowingEnd(offset) else {
+                    continue
+                }
                 guard let childRecord = storage.arena.realizeChildNode(
                     parent: record,
                     childIndex: index,
@@ -1361,20 +1482,35 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
                 ) else {
                     continue
                 }
-                let cursor = SyntaxNodeCursor(storage: storage, record: childRecord)
-                return try cursor.withToken(at: offset, body)
+                let childCursor = SyntaxNodeCursor(storage: storage, record: childRecord)
+                if let found = childCursor.findTokenLocation(at: offset) {
+                    return found
+                }
             case .token(let token):
-                let cursor = SyntaxTokenCursor(
-                    storage: storage,
+                let contains = childRange.contains(offset)
+                    || (childRange.isEmpty && childRange.start == offset)
+                guard contains else {
+                    continue
+                }
+                return TokenLocation(
                     parentRecord: record,
                     childIndex: UInt32(index),
                     offset: absoluteChildStart,
                     green: token
                 )
-                return try body(cursor)
             }
         }
         return nil
+    }
+
+    private borrowing func makeTokenCursor(from location: TokenLocation<Lang>) -> SyntaxTokenCursor<Lang> {
+        SyntaxTokenCursor(
+            storage: storage,
+            parentRecord: location.parentRecord,
+            childIndex: location.childIndex,
+            offset: location.offset,
+            green: location.green
+        )
     }
 
     public borrowing func withCoveringElement<R>(

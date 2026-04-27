@@ -432,10 +432,13 @@ private func describeElementWalkEvent(_ event: borrowing SyntaxElementWalkEvent<
     let tree = result.snapshot.makeSyntaxTree()
     let shared = tree.share()
 
-    let tokenAtFive = shared.withRoot { root in
-        root.withToken(at: 5) { token in
-            token.makeString()
-        }
+    let tokenAtFive: String? = shared.withRoot { root in
+        root.withTokenAtOffset(
+            5,
+            none: { nil },
+            single: { token in token.makeString() },
+            between: { _, right in right.makeString() }
+        )
     }
     #expect(tokenAtFive == "+")
 
@@ -452,10 +455,13 @@ private func describeElementWalkEvent(_ event: borrowing SyntaxElementWalkEvent<
         let node = root.withDescendant(atPath: [2, 2]) { child in
             child.makeHandle()
         }!
-        let token = root.withToken(at: 8) { token in
-            token.makeHandle()
-        }!
-        return (node, token)
+        let token: SyntaxTokenHandle<TestLanguage>? = root.withTokenAtOffset(
+            8,
+            none: { nil },
+            single: { $0.makeHandle() },
+            between: { _, right in right.makeHandle() }
+        )
+        return (node, token!)
     }
 
     #expect(handles.0.withCursor { $0.makeString() } == "c + d")
@@ -479,9 +485,12 @@ private func describeElementWalkEvent(_ event: borrowing SyntaxElementWalkEvent<
                     root.forEachDescendantOrToken(includingSelf: true) { element in
                         labels.append(describeElement(element))
                     }
-                    let token = root.withToken(at: 8) { token in
-                        token.makeString()
-                    } ?? "nil"
+                    let token = root.withTokenAtOffset(
+                        8,
+                        none: { "nil" },
+                        single: { $0.makeString() },
+                        between: { _, right in right.makeString() }
+                    )
                     let path = root.withDescendant(atPath: [2, 2]) { child in
                         child.childIndexPath().map(String.init).joined(separator: ".")
                     } ?? "nil"
@@ -553,7 +562,7 @@ private func describeElementWalkEvent(_ event: borrowing SyntaxElementWalkEvent<
             labels.append("rhs.backwardNodes:\(backwardNodes.joined(separator: "|"))")
         }
 
-        _ = root.withToken(at: 13) { token in
+        func describeToken13(_ token: borrowing SyntaxTokenCursor<TestLanguage>) {
             labels.append("token13.prev:\(token.withPreviousSiblingOrToken { element in describeElement(element) } ?? "nil")")
             labels.append("token13.next:\(token.withNextSiblingOrToken { element in describeElement(element) } ?? "nil")")
 
@@ -563,11 +572,23 @@ private func describeElementWalkEvent(_ event: borrowing SyntaxElementWalkEvent<
             }
             labels.append("token13.forward:\(forwardElements.joined(separator: "|"))")
         }
+        root.withTokenAtOffset(
+            13,
+            none: {},
+            single: { describeToken13($0) },
+            between: { _, right in describeToken13(right) }
+        )
 
-        _ = root.withToken(at: 15) { token in
+        func describeToken15(_ token: borrowing SyntaxTokenCursor<TestLanguage>) {
             labels.append("token15.next:\(token.withNextSiblingOrToken { element in describeElement(element) } ?? "nil")")
             labels.append("token15.prev:\(token.withPreviousSiblingOrToken { element in describeElement(element) } ?? "nil")")
         }
+        root.withTokenAtOffset(
+            15,
+            none: {},
+            single: { describeToken15($0) },
+            between: { _, right in describeToken15(right) }
+        )
 
         return labels
     }
@@ -608,13 +629,19 @@ private func describeElementWalkEvent(_ event: borrowing SyntaxElementWalkEvent<
             labels.append("nodeAncestorsSelf:\(includingSelf.joined(separator: "|"))")
         }
 
-        _ = root.withToken(at: 8) { token in
+        func collectTokenAncestors(_ token: borrowing SyntaxTokenCursor<TestLanguage>) {
             var ancestors: [String] = []
             token.forEachAncestor { ancestor in
                 ancestors.append(ancestor.makeString())
             }
             labels.append("tokenAncestors:\(ancestors.joined(separator: "|"))")
         }
+        root.withTokenAtOffset(
+            8,
+            none: {},
+            single: { collectTokenAncestors($0) },
+            between: { _, right in collectTokenAncestors(right) }
+        )
 
         return labels
     }
@@ -701,9 +728,12 @@ private func describeElementWalkEvent(_ event: borrowing SyntaxElementWalkEvent<
             return .continue
         }
 
-        let tokenAtProbe = root.withToken(at: fixture.probeTokenOffset) { token in
-            describeToken(token)
-        }
+        let tokenAtProbe: String? = root.withTokenAtOffset(
+            fixture.probeTokenOffset,
+            none: { nil },
+            single: { describeToken($0) },
+            between: { _, right in describeToken(right) }
+        )
 
         let coveringProbe = root.withCoveringElement(fixture.probeNodeRange) { element in
             describeElementWithOffset(element)

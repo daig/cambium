@@ -183,9 +183,13 @@ The original spec defined only `utf8Count`, `writeUTF8(to:)`, and `makeString()`
 
 The remaining gap is mostly spec/API shape, not the old implementation gap. The architecture doc should be updated to describe this byte-oriented contract directly and to decide whether higher-level Unicode scalar/character helpers such as `contains_char`, `find_char`, or `char_at` belong on `SyntaxText` itself or in a separate utility layer.
 
-### C3. The spec didn't define `TokenAtOffset.Between`
+### C3. Resolved: `TokenAtOffset.Between` distinction is now exposed
 
-cstree's `token_at_offset` (`syntax/node.rs:848`, `utility_types.rs:133`) returns `None | Single(T) | Between(T, T)`. The `Between` case occurs at exact token boundaries (cursor placement at a token gap is the canonical IDE situation). Cambium's `withToken(at:)` returns Optional, losing the disambiguation. No editor consumer can correctly select "the token to the left vs the token to the right of the cursor" without re-implementing the logic. This is a spec-level gap, not an implementation oversight.
+cstree's `token_at_offset` returns `None | Single(T) | Between(T, T)`; the `Between` case is the canonical IDE cursor-placement-at-boundary situation. Cambium previously had `withToken(at:)` returning `Optional<R>`, which silently right-leaned at boundaries and gave editor consumers no way to disambiguate.
+
+Resolved by replacing `withToken(at:)` with `SyntaxNodeCursor.withTokenAtOffset(_:none:single:between:)` — three closure parameters dispatched by the lookup. Boundary at `prev.end == offset == next.start` (with both non-zero-length) invokes `between(prev, next)`; a zero-length token at the offset (typically a missing-token placeholder) takes precedence and surfaces as `single(Z)`; out-of-tree offsets invoke `none`. Implementation does two `findTokenLocation` walks (offset and offset-1) and resolves the case, then materializes cursors and dispatches.
+
+The closure-based shape is a workaround for a Swift compiler bug — pattern-matching multi-payload `~Copyable` enum cases (`case .between(let l, let r)`) emits "copy of noncopyable typed value. This is a compiler bug." See https://forums.swift.org/t/copy-of-noncopyable-typed-value-bug/84873 for the bug family. The natural enum shape is documented in a comment block above `TokenLocation` in `Sources/CambiumCore/SyntaxTree.swift` and should be revisited once the compiler bug is fixed. `TokenAtOffsetTests.swift` covers None / Single (start, end, strictly-inside, zero-length-wins) / Between (within a parent, across subtree boundary).
 
 ### C4. Resolved: separate "static text" from "missing" in `TokenTextStorage` (arch §10.1)
 
@@ -207,7 +211,7 @@ Cambium now maintains an explicit FIFO queue across token and node cache entries
 
 | # | cstree has | Cambium status | Notes |
 |---|---|---|---|
-| D1 | `TokenAtOffset` (None/Single/Between) | only Optional from `withToken(at:)` | Editor cursor placement at boundaries can't disambiguate |
+| D1 | `TokenAtOffset` (None/Single/Between) | `withTokenAtOffset(_:none:single:between:)` exposes all three cases via three closures | Closure-callback shape is a workaround for a compiler bug affecting multi-payload `~Copyable` enum patterns; see C3 |
 | D2 | Builder cache extraction after `finish` | `finish()` returns cache-preserving `GreenBuildResult` | OK |
 | D3 | Static-text validation in `builder.token(_:text:)` | `token` and `largeToken` throw `staticKindRequiresStaticToken` for any kind whose `Lang.staticText(for:)` is non-nil | Stricter than cstree's `debug_assert_eq!`: static-kind tokens *must* go through `staticToken(_:)` |
 | D4 | Per-node user data type `D` | Sidecar `SyntaxMetadataStore` only | Different design choice, but no equivalent to `try_set_data` / `clear_data` directly on a node |
@@ -236,15 +240,14 @@ Cambium now maintains an explicit FIFO queue across token and node cache entries
 - **A7 is gone**: anchors no longer exist; `WitnessTests.swift` covers the witness-based replacement contract that replaces them.
 - **D3 coverage is present.** `BuilderStaticKindGuardTests.swift` covers the dynamic-text paths (`token`, `largeToken`, `token(_:bytes:)`) rejecting static-text kinds, plus regression guards that the dynamic kinds still work and that `staticToken(_:)` is unaffected.
 - **`ReuseOracle` edit-overlap coverage is present.** `WitnessTests.swift` covers candidate rejection on overlap, internal insertion, multi-edit invalidation, allowed boundary insertions, allowed earlier-edit shift, and recursive descent into a valid descendant when the larger candidate is invalidated.
+- **`TokenAtOffset` coverage is present.** `TokenAtOffsetTests.swift` covers the three-closure dispatch: None for out-of-range and empty trees, Single for strictly-inside / start / end / zero-length-precedence, Between within a parent and across subtree boundaries.
 - **No `walkPreorderWithTokens` skip/stop test.** Test uses skip on node-only walk only.
 
 ---
 
 ## Recommended priority
 
-1. **D1/C3** — add `TokenAtOffset` with `none`, `single`, and `between` so IDE
-   cursor-boundary queries are represented directly.
-2. **Incremental reuse oracle: green-hash check** — `ReuseOracle` now
+1. **Incremental reuse oracle: green-hash check** — `ReuseOracle` now
    filters candidates by edit overlap (mapping each candidate's old range
    through every edit and rejecting `.invalidated` outcomes), so parsers
    can no longer be offered a subtree whose old text was directly modified.
@@ -253,9 +256,13 @@ Cambium now maintains an explicit FIFO queue across token and node cache entries
    right kind but the previous subtree was invalidated by something the
    edit list doesn't capture. Less critical than edit-overlap; pick up
    when a real parser integration exposes a need.
-3. **B2/B4/B5** — benchmark before changing: cold red-realization locking, wide
+2. **B2/B4/B5** — benchmark before changing: cold red-realization locking, wide
    node offset tables, and ARC traffic from copyable green wrappers are
    performance proof items, not current correctness bugs.
+3. **Revisit `TokenAtOffset` once Swift compiler bug is fixed.** The current
+   three-closure dispatch on `withTokenAtOffset` is a workaround; the
+   natural shape is a `~Copyable` enum with `none | single(...) |
+   between(left:, right:)`. See C3 / D1 above.
 
 ## Deferred performance items
 
