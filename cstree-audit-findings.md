@@ -13,54 +13,16 @@ performance risks that should be triaged before or shortly after v1.
   wrong-resolver replacement, snapshot-replacement identity collisions,
   zero-length tokens leaking outside their query range, invalid UTF-8
   breaking text-length invariants, `visitPreorder(.stop)` sibling
-  traversal, inconsistent public `GreenToken` construction, and
-  `firstReusableNode` boundary search lacking early exit and coverage.
+  traversal, inconsistent public `GreenToken` construction,
+  `firstReusableNode` boundary search lacking early exit and coverage,
+  and the snapshot decoder trapping on unknown raw kinds.
 - Remaining findings here are based on code inspection and traced behaviour
   rather than executed tests; treat them as high-confidence but unvalidated
   until tests land.
 
 ## Priority 0: Correctness Bugs
 
-### 1. Decoder Traps On Unknown `RawSyntaxKind` Values
-
-**Severity:** Medium
-
-**Area:** snapshot decoding, macro-generated `kind(for:)`
-
-`GreenSnapshotDecoder` reads raw kinds as bare `UInt32` values without
-validating them against the language's enum. The validation paths
-(`validateStaticTokenLength`, `rebuildElements`) then call
-`Lang.kind(for: rawKind)`, which the macro implements as `preconditionFailure`
-for unknown values. A truncated, version-skewed, or hostile snapshot can crash
-the decoder rather than producing a typed error.
-
-Relevant code:
-
-- `Sources/CambiumSerialization/GreenSnapshotSerialization.swift`
-  - `GreenSnapshotDecodedTreeBuilder.readRecord`
-  - `GreenSnapshotDecodedTreeBuilder.validateStaticTokenLength(rawKind:textLength:)`
-- `Sources/CambiumSyntaxMacrosPlugin/CambiumSyntaxKindMacro.swift`
-  - generated `kind(for:)` body
-
-Why it matters:
-
-- Decoders are exactly where defensive failure modes matter: callers should
-  handle bad input as a typed error, not a crash.
-- Forward-compatibility is broken: a snapshot written by a future version with
-  new kinds traps the older decoder instead of producing a clean diagnostic.
-
-Likely fix:
-
-- Add a throwing language entry point (e.g. `tryKind(for:) throws -> Kind`) or
-  expose an `isKnown(_:)` predicate, and have the decoder reject unknown raw
-  kinds with a new `CambiumSerializationError.unknownKind(_:)`.
-
-Acceptance tests:
-
-- A snapshot whose raw-kind field is outside the language's enum decodes with a
-  typed error rather than trapping.
-
-### 2. Overlay-Fallback Replacement Resolver Loses `tokenKeyNamespace`
+### 1. Overlay-Fallback Replacement Resolver Loses `tokenKeyNamespace`
 
 **Severity:** Medium
 
@@ -101,7 +63,7 @@ Likely fix:
 - Or merge the overlay's mappings into a fresh `TokenTextSnapshot` at
   replacement time, which preserves namespace at the cost of a copy.
 
-### 3. Node-Cache Eviction Undercounts Hash-Bucket Entries
+### 2. Node-Cache Eviction Undercounts Hash-Bucket Entries
 
 **Severity:** Medium-Low
 
@@ -138,7 +100,7 @@ Likely fix:
 
 ## Priority 1: Performance Risks
 
-### 4. Green Cache Hits Still Allocate Candidate Nodes First
+### 3. Green Cache Hits Still Allocate Candidate Nodes First
 
 **Severity:** Major performance concern
 
@@ -178,7 +140,7 @@ Measurement target:
   confirm allocation count drops on cache hits.
 - Benchmark replacement in wide shallow nodes and deep narrow nodes.
 
-### 5. String Materialization Decodes And Reallocates Per Chunk
+### 4. String Materialization Decodes And Reallocates Per Chunk
 
 **Severity:** Major performance concern
 
@@ -217,7 +179,7 @@ Measurement target:
   same total byte count.
 - Track allocations and wall time before/after a byte-buffer sink.
 
-### 6. `withDescendant(atPath:)` Triggers O(childIndex) Per Step On First Realization
+### 5. `withDescendant(atPath:)` Triggers O(childIndex) Per Step On First Realization
 
 **Severity:** Performance concern (cold path)
 
@@ -246,7 +208,7 @@ Likely fix:
 - Thread `childStart` through the loop in `withDescendant(atPath:)`, matching
   the pattern used by sibling and child traversal helpers.
 
-### 7. Token Interners Allocate `[UInt8]` On Every Lookup
+### 6. Token Interners Allocate `[UInt8]` On Every Lookup
 
 **Severity:** Major performance concern (hot path)
 
@@ -275,7 +237,7 @@ Measurement target:
 - Allocation count per `intern` call drops on cache hits.
 - Steady-state interning throughput improves on token-dense input.
 
-### 8. `SharedTokenInterner.resolve` Locks The Shard On Every Read
+### 7. `SharedTokenInterner.resolve` Locks The Shard On Every Read
 
 **Severity:** Performance concern (concurrent reads)
 
@@ -302,7 +264,7 @@ Likely fix:
   lock-free.
 - Alternatively, expose a borrowed snapshot resolver for read-heavy passes.
 
-### 9. Slot Chunks Over-Provision For Token Children
+### 8. Slot Chunks Over-Provision For Token Children
 
 **Severity:** Memory performance concern
 
@@ -329,7 +291,7 @@ Likely fix:
   `GreenNodeStorage` for wide nodes). Adds one indirection per realization,
   saves memory proportional to token density.
 
-### 10. `GreenSnapshotEncoder.collect` Allocates Canonical Nodes Before Dedup Check
+### 9. `GreenSnapshotEncoder.collect` Allocates Canonical Nodes Before Dedup Check
 
 **Severity:** Performance concern (serialization path)
 
@@ -351,7 +313,7 @@ Likely fix:
 - Dedup via a key on `(rawKind, [childIDs])` *before* allocating the canonical
   node.
 
-### 11. `BinaryWriter.bytes` Doesn't Reserve Capacity
+### 10. `BinaryWriter.bytes` Doesn't Reserve Capacity
 
 **Severity:** Minor performance concern
 
@@ -374,7 +336,7 @@ Likely fix:
 - Call `bytes.reserveCapacity(estimatedSize)` once before the body of `encode`,
   with an estimate based on the known record/string counts.
 
-### 12. `RedArena.realizeChildNode` Slow Path Serializes On A Single Mutex
+### 11. `RedArena.realizeChildNode` Slow Path Serializes On A Single Mutex
 
 **Severity:** Performance concern (concurrent traversal)
 
@@ -397,7 +359,7 @@ Likely fix candidates:
 - Thread-local arena that periodically merges into shared state.
 - Benchmark first to confirm contention before changing the model.
 
-### 13. Recursive Traversal Risks Stack Overflow On Pathological Inputs
+### 12. Recursive Traversal Risks Stack Overflow On Pathological Inputs
 
 **Severity:** Robustness concern
 
