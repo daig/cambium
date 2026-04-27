@@ -1114,6 +1114,92 @@ private enum ListSpec: TypedSyntaxNode {
     }
 }
 
+@Test func tokensInRangeExcludesZeroLengthTokenOutsideQueryRange() throws {
+    // Audit-finding regression: a tree containing only a zero-length missing
+    // token at offset 0 must not surface that token for a query like [10, 11).
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.root)
+    builder.missingToken(.missing)
+    try builder.finishNode()
+    let tree = try builder.finish().snapshot.makeSyntaxTree()
+
+    let collected = collectTokenLabels(tree, in: TextRange(start: 10, end: 11))
+    #expect(collected.isEmpty)
+}
+
+@Test func tokensInRangeIncludesZeroLengthTokenAtLeftBoundary() throws {
+    // Half-open semantics: a zero-length token at offset == range.start is
+    // included alongside any non-empty tokens whose ranges intersect the
+    // query. Without the fix `intersects` undershoots the left boundary for
+    // empty candidates and `range.contains(start)` is the rule that
+    // restores parity.
+    let tree = try makeMixedZeroLengthTree()
+    let collected = collectTokenLabels(tree, in: TextRange(start: 3, end: 5))
+    #expect(collected == ["token:missing:@3", "token:identifier:de@3"])
+}
+
+@Test func tokensInRangeExcludesZeroLengthTokenAtRightBoundary() throws {
+    // Half-open semantics: a zero-length token at offset == range.end is
+    // excluded, matching how non-empty tokens are excluded at the right edge.
+    let tree = try makeMixedZeroLengthTree()
+    let collected = collectTokenLabels(tree, in: TextRange(start: 0, end: 3))
+    #expect(collected == ["token:identifier:abc@0"])
+}
+
+@Test func tokensInRangeWithEmptyQueryYieldsNothing() throws {
+    // Empty query is a degenerate range, not a point query. Callers wanting
+    // point semantics should use `withTokenAtOffset`.
+    let tree = try makeMixedZeroLengthTree()
+    let collected = collectTokenLabels(tree, in: TextRange(start: 3, end: 3))
+    #expect(collected.isEmpty)
+}
+
+@Test func tokensInRangeStillFiltersNonEmptyTokensCorrectly() throws {
+    // Non-empty regression: filtering of non-empty tokens is unchanged. A
+    // mid-range query yields exactly the tokens whose ranges intersect.
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.root)
+    try builder.token(.identifier, text: "abc")     // [0, 3)
+    try builder.token(.identifier, text: "def")     // [3, 6)
+    builder.missingToken(.missing)                    // [6, 6) zero-length
+    try builder.token(.identifier, text: "ghi")     // [6, 9)
+    try builder.finishNode()
+    let tree = try builder.finish().snapshot.makeSyntaxTree()
+
+    let middle = collectTokenLabels(tree, in: TextRange(start: 3, end: 6))
+    #expect(middle == ["token:identifier:def@3"])
+
+    let trailing = collectTokenLabels(tree, in: TextRange(start: 3, end: 9))
+    #expect(trailing == [
+        "token:identifier:def@3",
+        "token:missing:@6",
+        "token:identifier:ghi@6",
+    ])
+}
+
+private func makeMixedZeroLengthTree() throws -> SyntaxTree<TestLanguage> {
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.root)
+    try builder.token(.identifier, text: "abc")     // [0, 3)
+    builder.missingToken(.missing)                    // [3, 3) zero-length
+    try builder.token(.identifier, text: "de")      // [3, 5)
+    try builder.finishNode()
+    return try builder.finish().snapshot.makeSyntaxTree()
+}
+
+private func collectTokenLabels(
+    _ tree: borrowing SyntaxTree<TestLanguage>,
+    in range: TextRange
+) -> [String] {
+    var labels: [String] = []
+    tree.withRoot { root in
+        root.tokens(in: range) { token in
+            labels.append(describeToken(token))
+        }
+    }
+    return labels
+}
+
 private extension FixedWidthInteger {
     var littleEndianBytes: [UInt8] {
         withUnsafeBytes(of: littleEndian) { Array($0) }

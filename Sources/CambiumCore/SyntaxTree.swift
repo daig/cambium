@@ -1325,7 +1325,7 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
         in range: TextRange? = nil,
         _ body: (borrowing SyntaxTokenCursor<Lang>) throws -> Void
     ) rethrows {
-        if let range, !textRange.intersects(range), !textRange.isEmpty {
+        if let range, !range.includesElement(textRange) {
             return
         }
 
@@ -1338,7 +1338,7 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
             defer {
                 childStart = childStart + child.textLength
             }
-            if let range, !childRange.intersects(range), !childRange.isEmpty {
+            if let range, !range.includesElement(childRange) {
                 continue
             }
 
@@ -1839,6 +1839,24 @@ public enum SyntaxElementCursor<Lang: SyntaxLanguage>: ~Copyable {
             node.textRange
         case .token(let token):
             token.textRange
+        }
+    }
+}
+
+private extension TextRange {
+    /// Half-open inclusion test for `tokens(in:)`. Empty candidates are
+    /// included only when their offset lies strictly inside `self` —
+    /// matching the half-open behavior `intersects` already gives for
+    /// non-empty candidates and the zero-length-at-offset clause used by
+    /// `findTokenLocation`. Without this, `intersects` undershoots at the
+    /// left boundary for empty candidates (`[X, X).intersects([X, X+n))`
+    /// is false), and a naive `!isEmpty` bandaid leaks zero-length
+    /// candidates everywhere into the result.
+    func includesElement(_ candidate: TextRange) -> Bool {
+        if candidate.isEmpty {
+            return contains(candidate.start)
+        } else {
+            return intersects(candidate)
         }
     }
 }
