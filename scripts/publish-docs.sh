@@ -11,20 +11,13 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TARGETS=(
-  Cambium
-  CambiumCore
-  CambiumBuilder
-  CambiumIncremental
-  CambiumAnalysis
-  CambiumASTSupport
-  CambiumOwnedTraversal
-  CambiumSerialization
-  CambiumTesting
-  CambiumSyntaxMacros
-)
+DOCC_BUNDLE="$REPO_ROOT/Sources/Cambium/Cambium.docc"
+BUNDLE_NAME="Cambium"
+BUNDLE_ID="org.cambium.Cambium"
+BUNDLE_VERSION="0.1.0"
 HOSTING_BASE_PATH="cambium"
 BRANCH="gh-pages"
+SYMBOLGRAPH_DIR="$REPO_ROOT/.build/symbolgraph"
 BUILD_DIR="$(mktemp -d)"
 WORKTREE_DIR="$(mktemp -d)"
 
@@ -43,17 +36,32 @@ fi
 
 SOURCE_SHA="$(git rev-parse --short HEAD)"
 
-echo "==> Building combined DocC for ${TARGETS[*]}"
-TARGET_ARGS=()
-for t in "${TARGETS[@]}"; do
-  TARGET_ARGS+=(--target "$t")
+echo "==> Building package with symbol-graph emission"
+RAW_SYMGRAPH_DIR="$REPO_ROOT/.build/symbolgraph-raw"
+rm -rf "$RAW_SYMGRAPH_DIR" "$SYMBOLGRAPH_DIR"
+mkdir -p "$RAW_SYMGRAPH_DIR" "$SYMBOLGRAPH_DIR"
+swift build \
+  -Xswiftc -emit-extension-block-symbols \
+  -Xswiftc -emit-symbol-graph \
+  -Xswiftc -emit-symbol-graph-dir -Xswiftc "$RAW_SYMGRAPH_DIR"
+
+echo "==> Filtering to Cambium* symbol graphs"
+# Only keep our own modules — exclude swift-syntax and other deps.
+shopt -s nullglob
+for f in "$RAW_SYMGRAPH_DIR"/Cambium*.symbols.json; do
+  case "$(basename "$f")" in
+    CambiumSyntaxMacrosPlugin*) continue ;;  # internal macro plugin
+  esac
+  cp "$f" "$SYMBOLGRAPH_DIR/"
 done
-swift package \
-  --allow-writing-to-directory "$BUILD_DIR" \
-  generate-documentation \
-  "${TARGET_ARGS[@]}" \
-  --enable-experimental-combined-documentation \
-  --disable-indexing \
+shopt -u nullglob
+
+echo "==> Converting Cambium.docc with all symbol graphs"
+xcrun docc convert "$DOCC_BUNDLE" \
+  --fallback-display-name "$BUNDLE_NAME" \
+  --fallback-bundle-identifier "$BUNDLE_ID" \
+  --fallback-bundle-version "$BUNDLE_VERSION" \
+  --additional-symbol-graph-dir "$SYMBOLGRAPH_DIR" \
   --transform-for-static-hosting \
   --hosting-base-path "$HOSTING_BASE_PATH" \
   --output-path "$BUILD_DIR"
