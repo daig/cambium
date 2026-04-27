@@ -1,170 +1,74 @@
 # cstree Gap Roadmap
 
 This document tracks the remaining practical gaps between Cambium and Rust
-`cstree`, with an emphasis on work that can be completed incrementally. Cambium
-already has the core runtime shape: syntax kinds, green nodes/tokens, a builder,
-interned token text, lazy red storage, shared tree handles, replacement,
-serialization, metadata sidecars, and derive-like syntax-kind macros.
+`cstree`. It is future-oriented: the baseline below describes what Cambium can
+already rely on, and the roadmap tracks work still worth doing.
 
 The goal is not strict API cloning. Cambium should keep its Swift-native design:
 borrowed cursors for hot traversal, explicit copyable handles for ownership,
 parser-neutral infrastructure, and immutable trees updated through replacement.
 
-## Current Coverage
+## Current Baseline
 
-- Homogeneous CST tagged by `RawSyntaxKind`.
-- Language-specific `SyntaxLanguage` policy and derived `SyntaxKind` support.
-- Green nodes and tokens with structural hashes and text lengths.
-- Local token interning and immutable `TokenTextSnapshot` values for finished trees.
-- Green tree builder with checkpoints, retroactive wrapping, static tokens, and
-  cache-preserving `finish()`.
-- Green node/token cache with local and shared cache entry points.
+- Homogeneous CST tagged by `RawSyntaxKind`, with language-specific
+  `SyntaxLanguage` policy and macro-derived `SyntaxKind` support.
+- Green nodes and tokens with structural hashes, byte lengths, static tokens,
+  missing tokens, dynamic-token validation, and local/shared token interning.
+- Green tree builder with checkpoints, retroactive wrapping, cache-preserving
+  `finish()`, namespace-aware subtree reuse, and bounded FIFO green caches.
 - Lazy persistent red arena with shared syntax tree storage, stable red records,
   and lock-free reads for realized children.
 - Borrowed node/token cursors and copyable node/token handles.
-- Borrowed core traversal for first/last children, node/token siblings,
-  ancestors, descendants, and preorder walk events.
-- Byte-first `SyntaxText` chunk iteration, search, slicing, and equality.
+- Borrowed traversal for first/last child helpers, node/token siblings,
+  ancestors, descendants, preorder walk events, visible-range token walks, and
+  callback-based `withTokenAtOffset(_:none:single:between:)`.
+- Byte-first `SyntaxText` chunk iteration, search, slicing, streaming write, and
+  equality without full string materialization.
 - Witness-based cross-version change descriptions for replacement and
   incremental parse reuse.
-- Node replacement by rebuilding the ancestor path.
+- Node replacement by rebuilding the ancestor path, including root replacement.
 - Green snapshot serialization and decoding.
-- Basic sidecar metadata and external analysis cache helpers.
-- Skeletal incremental parse session, text edits, range mapping, reuse oracle,
-  and accepted-reuse logging.
+- Sidecar metadata and external analysis cache helpers.
+- Incremental parse session primitives: text edits, range mapping, reuse oracle,
+  accepted-reuse logging, cache/interner carry-forward, and reuse diagnostics.
 
-## Priority 1: Traversal API Completeness
+## Priority 1: Token Streams And Editing
 
-cstree exposes a rich red tree navigation surface: ancestors, siblings,
-first/last child, first/last token, descendants, preorder walk events, and
-node/token-inclusive variants. Cambium has the core cursor primitives, but the
-public traversal layer is still sparse.
+Cambium has token lookup and in-subtree token enumeration. The next token-level
+slice should focus on formatter/editor workflows that need stream navigation and
+small replacements.
 
-Status: the borrowed `CambiumCore` traversal slice is complete. The core now
-has node-only and token-aware child helpers, sibling traversal, ancestor
-traversal, descendant traversal, and preorder enter/leave walk events without
-array materialization or implicit owned-handle creation.
-
-Completed work:
-
-1. Added borrowed cursor helpers for first/last child node and first/last child or
-   token.
-2. Added sibling traversal that can include tokens, not only node siblings.
-3. Added ancestor traversal for node cursors and token cursors.
-4. Added descendant traversal with node-only and node-or-token variants.
-5. Added preorder walk events with enter/exit events, including token-aware
-   traversal.
-
-Remaining follow-up:
-
-1. Mirror selected helpers on copyable handles in `CambiumOwnedTraversal` where
-   allocation/ownership cost is explicit and a concrete caller needs it.
-2. Keep first/last token stream helpers with previous/next token traversal under
-   Priority 3, since those cross subtree boundaries rather than only walking raw
-   child positions.
-
-Acceptance criteria:
-
-- Common editor queries can now be expressed without materializing arrays in
-  `CambiumCore`.
-- Token-inclusive traversal no longer requires clients to manually recompute child
-  offsets.
-- Borrowed traversal remains the primary zero-retain path.
-
-## Priority 2: Richer `SyntaxText`
-
-cstree's `SyntaxText` supports efficient operations over distributed token text
-without eagerly building a `String`. Cambium's `SyntaxText` currently supports
-UTF-8 writing, byte length, and string materialization.
-
-Status: the byte-first `SyntaxText` slice is complete. `SyntaxText` now supports
-range-aware chunk iteration, byte search, byte-range slicing, and streaming
-equality against strings and other syntax text values without requiring full
-string materialization.
-
-Completed work:
-
-1. Added `isEmpty`.
-2. Added chunk iteration over token UTF-8 buffers.
-3. Added byte-oriented `contains` helpers.
-4. Added byte-oriented `firstIndex` and `firstRange` search helpers.
-5. Added slicing by relative `TextRange`.
-6. Added efficient equality against strings and other `SyntaxText` values.
-
-Remaining follow-up:
-
-1. Decide whether Unicode `Character` or grapheme-cluster operations belong in
-   `SyntaxText` or in a higher-level utility.
-2. Add more specialized search APIs only when a concrete parser, formatter, or
-   query caller needs them.
-
-Acceptance criteria:
-
-- Formatters, lexers, and query code can now inspect subtree text without allocating
-  the full string.
-- Slicing preserves byte-offset semantics and validates range bounds.
-- Unicode behavior remains explicit: this completed slice is UTF-8 byte oriented.
-
-## Priority 3: Token-Level Navigation And Replacement
-
-Cambium can find and read tokens, but lacks several token-centric operations that
-are central for incremental lexing, selections, and formatting.
-
-Incremental work:
+Planned work:
 
 1. Add `staticText` convenience on token cursors and handles.
-2. Add `TokenAtOffset` with `none`, `single`, and `between` cases so exact
-   token-boundary queries are unambiguous.
-3. Validate or reject static-token kinds passed through dynamic
-   `builder.token(_:text:)` APIs.
-4. Add token text-key exposure where it is safe to expose interned identity.
-5. Add cheap token text equality helpers.
-6. Add previous/next token traversal across subtree boundaries.
-7. Add token replacement by rebuilding the ancestor path.
-8. Add element replacement for callers that operate on `SyntaxElementCursor`.
+2. Add safe token text-key exposure where interned identity is useful.
+3. Add cheap token text equality helpers.
+4. Add previous/next token traversal across subtree boundaries.
+5. Add token replacement by rebuilding the ancestor path.
+6. Add element replacement for callers operating on `SyntaxElementCursor`.
+7. Revisit a value-typed `TokenAtOffset` enum once Swift can reliably
+   pattern-match multi-payload `~Copyable` enum cases.
 
 Acceptance criteria:
 
-- A formatter can walk token streams without repeatedly descending from root.
-- A lexer-style incremental pass can replace a token or token span directly.
+- Formatters can walk token streams without repeatedly descending from root.
+- Lexer-style incremental passes can replace a token or token span directly.
 - Replacement preserves resolver correctness for interned and large token text.
 
-## Priority 4: Incremental Parsing Session Maturity
+## Priority 2: Incremental Parsing Maturity
 
-The current incremental module has useful pieces, but it is not yet a complete
-parser-facing reuse system. The library should remain grammar-neutral while
-providing strong building blocks for language parsers.
+The incremental module is grammar-neutral and already has useful reuse pieces.
+It still needs parser-facing examples, stronger matching, and measured behavior
+under real parse loops.
 
-Incremental work:
+Planned work:
 
-1. Done: `ReuseOracle` now consults a list of `TextEdit`s in old-tree
-   coordinates and rejects any candidate whose old range maps to
-   `.invalidated` through any edit. Boundary insertions at a candidate's
-   start or end remain reusable (range shifts but content is intact). The
-   recursive descent continues into a candidate's children when the
-   candidate itself is invalidated, so finer-grained valid descendants can
-   still be offered.
-2. Partially done: `ReuseOracle` now checks range (offset), kind, and edit
-   overlap. Green-hash matching is still future work — useful for catching
-   "the parser asked at a position that happens to have the right kind, but
-   the previous subtree's content was invalidated by something the edit
-   list doesn't capture (e.g., upstream semantic context)." Less critical
-   than edit-overlap; defer until a real parser integration exposes a need.
-3. Done: `recordReuseQuery(hitBytes:)` reflects the matched node's actual
-   `textRange.length`; `IncrementalParseCounters.reusedBytes` accumulates
-   accepted-offer bytes. `recordAcceptedReuse`/`consumeAcceptedReuses`
-   provide a parser-driven log for `ParseWitness` construction.
-4. Done: `GreenTreeBuilder.reuseSubtree` is namespace-aware (fast-path
-   when source and builder share `TokenKeyNamespace`, slow-path remap
-   otherwise) and returns `SubtreeReuseOutcome`.
-5. Partial: `IncrementalParseSession` owns the offer-side counters; the
-   accepted-reuse log lives there too. Cache lifetime is explicitly
-   threaded through `GreenBuildResult.intoCache()`. Shared interner policy
-   is still simple — `LocalTokenInternerStorage` per builder, optional
-   `SharedTokenInterner` for cross-builder coordination, no per-session
-   policy beyond carrying-the-cache.
-6. Add examples showing a hand-written parser using the reuse oracle.
-7. Add small-edit benchmarks comparing full parse and incremental reuse.
+1. Add green-hash matching to `ReuseOracle` when parser integration exposes a
+   concrete need beyond offset, kind, and edit-overlap checks.
+2. Add examples showing a hand-written parser using the reuse oracle and
+   accepted-reuse log.
+3. Add small-edit benchmarks comparing full parse and incremental reuse.
+4. Clarify cache/interner carry-forward patterns for parser integrations.
 
 Acceptance criteria:
 
@@ -173,20 +77,18 @@ Acceptance criteria:
 - Reuse never returns a subtree overlapping invalidated text.
 - Cache/interner reuse across parse versions is explicit and measurable.
 
-## Priority 5: Interner And Cache Maturity
+## Priority 3: Interner And Cache Policy
 
-Cambium has local and shared interning plus green caches. The green cache is
-now bounded by entry count, uses deterministic FIFO eviction, caches all tokens
-when enabled, and applies cstree's default small-node threshold of at most
-three children. Cache policy and interner pluggability are still early.
+Cambium has local/shared interning and bounded green caches. Cache policy and
+interner customization should mature from measured parser needs.
 
-Incremental work:
+Planned work:
 
-1. Add clearer APIs for supplying an existing interner/resolver to builders.
+1. Add clearer APIs for supplying existing interner/resolver state to builders.
 2. Decide whether third-party/custom interners need protocol-based integration.
 3. Track estimated bytes for cached nodes, tokens, and interned strings.
 4. Decide whether configurable or per-kind node cache thresholds are needed.
-5. Add richer cache statistics suitable for parser diagnostics and benchmarks.
+5. Add cache statistics suitable for parser diagnostics and benchmarks.
 6. Stress test shared cache and shared interner concurrency.
 
 Acceptance criteria:
@@ -195,13 +97,13 @@ Acceptance criteria:
 - Cache budgets are predictable under large files.
 - Shared cache and interner behavior is covered by concurrency tests.
 
-## Priority 6: Metadata And Analysis Lifecycle
+## Priority 4: Metadata And Analysis Lifecycle
 
-cstree supports custom data attached to red nodes. Cambium currently provides
-sidecar metadata and external analysis caches, which fits Swift better, but the
-lifecycle and ergonomics need tightening.
+cstree supports custom data attached to red nodes. Cambium uses sidecar metadata
+and external analysis caches instead, which fits Swift better, but the lifecycle
+and ergonomics need tightening.
 
-Incremental work:
+Planned work:
 
 1. Add `remove` and `clear` operations to `SyntaxMetadataStore`.
 2. Add `trySet` semantics for "set only if absent".
@@ -213,16 +115,17 @@ Incremental work:
 
 Acceptance criteria:
 
-- Callers can safely maintain memoized syntax facts without unbounded growth.
+- Callers can maintain memoized syntax facts without unbounded growth.
 - Metadata invalidation is explicit after tree replacement or reparsing.
 - The distinction between node-local facts and semantic caches is documented.
 
-## Priority 7: Typed AST Overlay Tooling
+## Priority 5: Typed AST Overlay Tooling
 
 cstree intentionally leaves language-specific typed ASTs above the generic CST
-runtime. Cambium currently has only minimal typed-node validation.
+runtime. Cambium should provide enough patterns for language packages without
+moving language-specific concepts into the core.
 
-Incremental work:
+Planned work:
 
 1. Add typed cursor and typed handle wrapper examples.
 2. Add child accessor patterns that preserve borrowed traversal.
@@ -237,18 +140,20 @@ Acceptance criteria:
 - Typed accessors do not force handle allocation in hot traversal paths.
 - Generated wrappers remain optional and separate from the core CST runtime.
 
-## Priority 8: Debugging, Display, And Documentation
+## Priority 6: Debugging, Display, And Documentation
 
-Cambium has test-only debug helpers but limited public display/debugging support.
+Cambium has test-only debug helpers but limited public display/debugging support
+and no getting-started path for new users.
 
-Incremental work:
+Planned work:
 
 1. Add public debug tree rendering with raw kind, language name, ranges, and text
    options.
-2. Add display helpers for subtree text and tokens.
+2. Add display helpers for subtree text and tokens, including streaming render
+   conveniences that do not require `makeString()`.
 3. Add a getting-started guide that mirrors the cstree flow: define kinds,
    build a green tree, obtain a red tree, traverse it.
-4. Add a parser example with static and dynamic tokens.
+4. Add a parser example with static, dynamic, and missing tokens.
 5. Add an incremental parsing example once the reuse APIs mature.
 
 Acceptance criteria:
@@ -257,24 +162,20 @@ Acceptance criteria:
 - Debug output is stable enough for snapshot tests.
 - Examples show both macro-derived and manually implemented syntax kinds.
 
-## Priority 9: Serialization Parity Decisions
+## Priority 7: Serialization Policy
 
 Cambium has custom green snapshot serialization. cstree offers optional serde
-support. Cambium should decide how much of the surrounding tree state belongs in
-serialization.
+support. Cambium should define the surrounding policy before broad use.
 
-Incremental work:
+Planned work:
 
 1. Document the current snapshot format and compatibility expectations.
 2. Decide whether red tree identity, witness history, metadata, or diagnostics
    should be serializable.
 3. Add explicit version migration policy.
 4. Add fuzz or malformed-input tests for decoder robustness.
-5. Cache-aware decoding (`decodeBuildResult`) for load-then-edit workflows —
-   deferred until a real parser/editor consumer measures first-edit latency
-   on freshly loaded trees. See `cstree-audit-findings.md` "Deferred
-   performance items" for context. `SubtreeReuseOutcome` is the diagnostic
-   signal that would trigger picking this back up.
+5. Revisit cache-aware decoding for load-then-edit workflows if real
+   parser/editor integrations show first-edit `.remapped` latency.
 
 Acceptance criteria:
 
@@ -283,28 +184,25 @@ Acceptance criteria:
 - Serialization stays green-tree-centric unless there is a concrete need to
   persist higher layers.
 
-## Priority 10: Concurrency And Performance Proof
+## Priority 8: Concurrency And Performance Proof
 
 Cambium's design depends on safe concurrent traversal and predictable allocation
 behavior. Several types use `@unchecked Sendable`, so tests and benchmarks need
 to carry more of the proof burden.
 
-Status: the first red-arena correctness slice is complete. Realized red records
-are now immutable arena-owned objects, cursor reads no longer acquire the arena
-mutex, and concurrent lazy realization is covered by focused tests. Broader CI
-sanitizer coverage and performance benchmarks remain open.
-
-Incremental work:
+Planned work:
 
 1. Add broader concurrent traversal stress tests beyond red child realization.
 2. Add Thread Sanitizer test runs in CI or documented local commands.
-3. Benchmark cold and warm red traversal.
+3. Benchmark cold and warm red traversal, including cold realization contention.
 4. Benchmark builder/cache behavior on large and repeated subtrees.
 5. Benchmark incremental reparse with small edits.
 6. Add huge-file tests for offset overflow boundaries, wide nodes, deep nodes,
    and large tokens.
 7. Add allocation-count or ARC-sensitive benchmarks for borrowed cursors versus
    handle-heavy traversal.
+8. Benchmark whether wide-node child offset tables or green arena storage are
+   worth their implementation complexity.
 
 Acceptance criteria:
 
@@ -312,16 +210,38 @@ Acceptance criteria:
 - Cache and interner policies can be tuned from measured data.
 - Borrowed traversal remains visibly cheaper than owned-handle traversal.
 
+## Priority 9: API Polish
+
+Several cstree conveniences are useful but not MVP-critical. Add them only when
+they simplify real callers or examples.
+
+Planned work:
+
+1. Add lazy or breakable sibling/child-range iteration patterns, including
+   `children_from` and `children_to` equivalents if needed.
+2. Add richer `SyntaxElementCursor` helpers such as node/token projections.
+3. Add `WalkEvent.map`-style conveniences if they reduce boilerplate.
+4. Decide whether Unicode scalar, `Character`, or grapheme-cluster operations
+   belong on `SyntaxText` or in a higher-level utility.
+5. Consider handle-based convenience mirrors in `CambiumOwnedTraversal` where
+   allocation and ownership costs are explicit.
+
+Acceptance criteria:
+
+- Convenience APIs remove real call-site friction.
+- Borrowed traversal remains the primary zero-retain path.
+- Unicode behavior stays explicit and byte offsets remain the core contract.
+
 ## Work Queue
 
 Suggested next slices:
 
-1. Token stream navigation: previous/next token across subtree boundaries.
-2. Token replacement.
-3. Owned traversal conveniences for selected borrowed traversal helpers.
-4. Incremental reuse oracle correctness upgrade.
-5. Debug tree rendering API and getting-started example.
-6. Broader concurrency stress tests for shared caches, interners, and traversal.
+1. Token stream navigation across subtree boundaries.
+2. Token and element replacement.
+3. Incremental reuse oracle green-hash matching or parser example.
+4. Debug tree rendering API and getting-started guide.
+5. Metadata lifecycle helpers.
+6. Shared cache/interner stress tests and TSan documentation.
 
 Each slice should include focused tests and avoid changing parser-neutral core
 contracts unless the new API has a clear downstream use case.

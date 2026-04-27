@@ -3,7 +3,6 @@
 **Document date:** 2026-04-25
 **Status:** Implemented architectural decision; supersedes the `SyntaxAnchor` design from `swift-native-cst-architecture.md` §18
 **Audience:** Cambium maintainers and consumers building identity trackers
-**Resolves:** audit issue A7 in `cstree-audit-findings.md`
 
 ---
 
@@ -447,7 +446,6 @@ Some consumer use cases break the witness chain (loaded from disk, third-party t
   - §14 (Borrowed cursor API)
   - §15 (Explicit handle API)
   - §18 (Stable anchors across tree versions) — the section this document supersedes
-- `cstree-audit-findings.md`, particularly issue **A7** (hardcoded 64-byte tolerance) — resolved by this design
 - The Boomerang paper (Foster et al., "Combinators for Bidirectional Tree Transformations") — the conceptual lineage for §16.1
 - The Augeas configuration editing tool — applied use of Boomerang-style lenses, referenced as an existence proof
 - cstree's documentation, for the salsa-decomposition analogy that motivated externalizing identity tracking
