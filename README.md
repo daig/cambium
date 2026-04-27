@@ -3,15 +3,22 @@
 Cambium is a Swift-native concrete syntax tree (CST) library inspired by
 Rust's [`cstree`](https://github.com/domenicquirl/cstree).
 
-The main documentation lives in the DocC catalog at
-[`Sources/Cambium/Cambium.docc`](Sources/Cambium/Cambium.docc). GitHub can
-render the source Markdown, but the intended reading experience is the local
-DocC site, where symbol links, topics, and API reference pages are connected.
+## Documentation
 
-Start with:
+The full DocC site is published at **<https://λ.dog/cambium/documentation/cambium/>**.
 
-- [Cambium overview](Sources/Cambium/Cambium.docc/Cambium.md)
-- [Getting started](Sources/Cambium/Cambium.docc/GettingStarted.md)
+It includes the article catalog plus API reference for every Cambium module
+(`CambiumCore`, `CambiumBuilder`, `CambiumIncremental`, `CambiumAnalysis`,
+`CambiumASTSupport`, `CambiumOwnedTraversal`, `CambiumSerialization`,
+`CambiumTesting`, `CambiumSyntaxMacros`) under one navigator with cross-module
+search.
+
+The source for the catalog lives in
+[`Sources/Cambium/Cambium.docc`](Sources/Cambium/Cambium.docc). To regenerate
+and republish the hosted site after changes, run
+[`scripts/publish-docs.sh`](scripts/publish-docs.sh) from a clean working tree
+on `main` — it builds a single DocC archive from all module symbol graphs and
+pushes it to the `gh-pages` branch.
 
 ## Requirements
 
