@@ -1155,6 +1155,29 @@ private enum ListSpec: TypedSyntaxNode {
     }
 }
 
+@Test func serializationRejectsUnknownRawKind() throws {
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.root)
+    try builder.token(.identifier, text: "a")
+    try builder.finishNode()
+    var bytes = try builder.finish().snapshot.serializeGreenSnapshot()
+
+    // TestKind has cases 1...7. Locate the identifier kind in the byte
+    // stream and overwrite with a UInt32 outside that enum range so the
+    // decoder must reject it.
+    let identifierKind = Array(UInt32(TestKind.identifier.rawValue).littleEndianBytes)
+    let identifierIndex = bytes.firstIndex(ofSequence: identifierKind)!
+    let unknownRawKind = UInt32(0xFFFF_FFFF)
+    let unknownBytes = Array(unknownRawKind.littleEndianBytes)
+    for offset in 0..<unknownBytes.count {
+        bytes[identifierIndex + offset] = unknownBytes[offset]
+    }
+
+    #expect(throws: CambiumSerializationError.unknownKind(RawSyntaxKind(unknownRawKind))) {
+        _ = try GreenSnapshotDecoder.decodeTree(bytes, as: TestLanguage.self)
+    }
+}
+
 @Test func tokensInRangeExcludesZeroLengthTokenOutsideQueryRange() throws {
     // Audit-finding regression: a tree containing only a zero-length missing
     // token at offset 0 must not surface that token for a query like [10, 11).

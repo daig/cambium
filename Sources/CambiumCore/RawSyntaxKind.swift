@@ -41,6 +41,13 @@ public protocol SyntaxLanguage: Sendable {
     static func rawKind(for kind: Kind) -> RawSyntaxKind
     static func kind(for raw: RawSyntaxKind) -> Kind
 
+    /// Whether `raw` is a kind this language recognises. Used at decode
+    /// boundaries to reject snapshots that carry unknown kinds (truncated
+    /// input, version skew, hostile data) before they enter the rest of
+    /// the pipeline. The default implementation answers via
+    /// `Kind(rawValue: raw.rawValue) != nil`.
+    static func isKnown(_ raw: RawSyntaxKind) -> Bool
+
     static func staticText(for kind: Kind) -> StaticString?
     static func isTrivia(_ kind: Kind) -> Bool
     static func isNode(_ kind: Kind) -> Bool
@@ -82,6 +89,10 @@ public extension SyntaxLanguage {
 
     static func name(for raw: RawSyntaxKind) -> String {
         name(for: kind(for: raw))
+    }
+
+    static func isKnown(_ raw: RawSyntaxKind) -> Bool {
+        Kind(rawValue: raw.rawValue) != nil
     }
 }
 

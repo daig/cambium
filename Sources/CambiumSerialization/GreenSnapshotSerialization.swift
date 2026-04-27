@@ -16,6 +16,7 @@ public enum CambiumSerializationError: Error, Sendable, Equatable {
     case invalidLargeTokenReference(UInt32)
     case invalidRecordTag(UInt8)
     case invalidTextStorageTag(UInt8)
+    case unknownKind(RawSyntaxKind)
     case staticTextUnavailable(kind: RawSyntaxKind)
     case staticTextLengthMismatch(kind: RawSyntaxKind, expected: TextSize, actual: TextSize)
     case dynamicTextLengthMismatch(kind: RawSyntaxKind, expected: TextSize, actual: TextSize)
@@ -537,6 +538,9 @@ private struct GreenSnapshotDecodedTreeBuilder<Lang: SyntaxLanguage> {
     private mutating func readRecord() throws -> DecodedElementRecord {
         let tag = try reader.readUInt8()
         let rawKind = RawSyntaxKind(try reader.readUInt32())
+        guard Lang.isKnown(rawKind) else {
+            throw CambiumSerializationError.unknownKind(rawKind)
+        }
         let textLength = TextSize(try reader.readUInt32())
         let structuralHash = try reader.readUInt64()
 
