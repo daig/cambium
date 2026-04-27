@@ -816,6 +816,43 @@ private func describeElementWalkEvent(_ event: borrowing SyntaxElementWalkEvent<
         "leave:root:a b c + d + e + f z",
     ])
 
+    let skipVisit = tree.withRoot { root in
+        var visited: [String] = []
+        let control = root.visitPreorder { node in
+            let text = node.makeString()
+            visited.append(text)
+            if text == "b c + d + e" {
+                return .skipChildren
+            }
+            return .continue
+        }
+        return (visited, control)
+    }
+    #expect(skipVisit.1 == .continue)
+    #expect(skipVisit.0 == [
+        "a b c + d + e + f z",
+        "b c + d + e",
+        "f",
+    ])
+
+    let stopVisit = tree.withRoot { root in
+        var visited: [String] = []
+        let control = root.visitPreorder { node in
+            let text = node.makeString()
+            visited.append(text)
+            if text == "b c + d + e" {
+                return .stop
+            }
+            return .continue
+        }
+        return (visited, control)
+    }
+    #expect(stopVisit.1 == .stop)
+    #expect(stopVisit.0 == [
+        "a b c + d + e + f z",
+        "b c + d + e",
+    ])
+
     let tokenWalk = tree.withRoot { root in
         root.withDescendant(atPath: [2, 2]) { inner in
             var events: [String] = []

@@ -1162,13 +1162,29 @@ public struct SyntaxNodeCursor<Lang: SyntaxLanguage>: ~Copyable {
     ) rethrows -> TraversalControl {
         switch try body(self) {
         case .continue:
-            var shouldStop = false
-            try forEachChild { child in
+            let record = record
+            let green = record.green
+            var childStart = TextSize.zero
+            for childIndex in 0..<green.childCount {
+                let childGreen = green.child(at: childIndex)
+                defer {
+                    childStart = childStart + childGreen.textLength
+                }
+                guard case .node = childGreen,
+                      let childRecord = storage.arena.realizeChildNode(
+                        parent: record,
+                        childIndex: childIndex,
+                        childStartOffset: childStart
+                      )
+                else {
+                    continue
+                }
+                let child = SyntaxNodeCursor(storage: storage, record: childRecord)
                 if try child.visitPreorder(body) == .stop {
-                    shouldStop = true
+                    return .stop
                 }
             }
-            return shouldStop ? .stop : .continue
+            return .continue
         case .skipChildren:
             return .continue
         case .stop:

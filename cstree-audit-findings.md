@@ -9,54 +9,18 @@ performance risks that should be triaged before or shortly after v1.
 
 ## Validation Notes
 
-- Finding 1 below was confirmed with a temporary regression test during the
-  original audit pass; the test was removed after capture. (Four earlier
-  findings from the same audited batch — wrong-resolver replacement,
-  snapshot-replacement identity collisions, zero-length tokens leaking
-  outside their query range, and invalid UTF-8 breaking text-length
-  invariants — have since been fixed and removed from this list.)
-- Other findings here are based on code inspection and traced behaviour rather
-  than executed tests; treat them as high-confidence but unvalidated until
-  tests land.
+- The original audit's confirmed findings — wrong-resolver replacement,
+  snapshot-replacement identity collisions, zero-length tokens leaking outside
+  their query range, invalid UTF-8 breaking text-length invariants, and
+  `visitPreorder(.stop)` sibling traversal — have since been fixed and removed
+  from this list.
+- Remaining findings here are based on code inspection and traced behaviour
+  rather than executed tests; treat them as high-confidence but unvalidated
+  until tests land.
 
 ## Priority 0: Correctness Bugs
 
-### 1. `visitPreorder(.stop)` Does Not Stop Sibling Traversal
-
-**Severity:** Medium
-
-**Area:** `SyntaxNodeCursor.visitPreorder`
-
-`visitPreorder` records that a child returned `.stop`, but it continues
-iterating over the remaining siblings before returning `.stop` to its caller.
-`walkPreorder` already stops immediately, so the traversal-control contract is
-inconsistent between the two APIs.
-
-Observed validation: visiting a root with two list children and returning
-`.stop` on the first list still visited the second list.
-
-Relevant code:
-
-- `Sources/CambiumCore/SyntaxTree.swift`
-  - `SyntaxNodeCursor.visitPreorder(_:)`
-
-Why it matters:
-
-- Callers using `.stop` for early exit still pay traversal cost.
-- More importantly, callbacks can observe nodes they explicitly requested not
-  to visit.
-
-Likely fix:
-
-- Return `.stop` immediately when a child visit returns `.stop`.
-
-Acceptance tests:
-
-- `visitPreorder` stops before later siblings.
-- `visitPreorder` still respects `.skipChildren` as "do not descend, but keep
-  walking siblings."
-
-### 2. Public Green Token Construction Can Violate Static-Text Invariants
+### 1. Public Green Token Construction Can Violate Static-Text Invariants
 
 **Severity:** Medium
 
@@ -96,7 +60,7 @@ Acceptance tests:
 - Public construction rejects `.staticText` for dynamic kinds unless the
   intended representation is explicitly "empty static text unavailable."
 
-### 3. `firstReusableNode` Aborts After First Matching Child Returns Nil
+### 2. `firstReusableNode` Aborts After First Matching Child Returns Nil
 
 **Severity:** Medium
 
@@ -132,7 +96,7 @@ Acceptance tests:
 - Two zero-length sibling nodes at the same offset, with the requested kind on
   the second, surface a reuse hit.
 
-### 4. Decoder Traps On Unknown `RawSyntaxKind` Values
+### 3. Decoder Traps On Unknown `RawSyntaxKind` Values
 
 **Severity:** Medium
 
@@ -171,7 +135,7 @@ Acceptance tests:
 - A snapshot whose raw-kind field is outside the language's enum decodes with a
   typed error rather than trapping.
 
-### 5. Overlay-Fallback Replacement Resolver Loses `tokenKeyNamespace`
+### 4. Overlay-Fallback Replacement Resolver Loses `tokenKeyNamespace`
 
 **Severity:** Medium
 
@@ -212,7 +176,7 @@ Likely fix:
 - Or merge the overlay's mappings into a fresh `TokenTextSnapshot` at
   replacement time, which preserves namespace at the cost of a copy.
 
-### 6. Node-Cache Eviction Undercounts Hash-Bucket Entries
+### 5. Node-Cache Eviction Undercounts Hash-Bucket Entries
 
 **Severity:** Medium-Low
 
@@ -249,7 +213,7 @@ Likely fix:
 
 ## Priority 1: Performance Risks
 
-### 7. Green Cache Hits Still Allocate Candidate Nodes First
+### 6. Green Cache Hits Still Allocate Candidate Nodes First
 
 **Severity:** Major performance concern
 
@@ -289,7 +253,7 @@ Measurement target:
   confirm allocation count drops on cache hits.
 - Benchmark replacement in wide shallow nodes and deep narrow nodes.
 
-### 8. String Materialization Decodes And Reallocates Per Chunk
+### 7. String Materialization Decodes And Reallocates Per Chunk
 
 **Severity:** Major performance concern
 
@@ -328,7 +292,7 @@ Measurement target:
   same total byte count.
 - Track allocations and wall time before/after a byte-buffer sink.
 
-### 9. `withDescendant(atPath:)` Triggers O(childIndex) Per Step On First Realization
+### 8. `withDescendant(atPath:)` Triggers O(childIndex) Per Step On First Realization
 
 **Severity:** Performance concern (cold path)
 
@@ -357,7 +321,7 @@ Likely fix:
 - Thread `childStart` through the loop in `withDescendant(atPath:)`, matching
   the pattern used by sibling and child traversal helpers.
 
-### 10. Token Interners Allocate `[UInt8]` On Every Lookup
+### 9. Token Interners Allocate `[UInt8]` On Every Lookup
 
 **Severity:** Major performance concern (hot path)
 
@@ -386,7 +350,7 @@ Measurement target:
 - Allocation count per `intern` call drops on cache hits.
 - Steady-state interning throughput improves on token-dense input.
 
-### 11. `SharedTokenInterner.resolve` Locks The Shard On Every Read
+### 10. `SharedTokenInterner.resolve` Locks The Shard On Every Read
 
 **Severity:** Performance concern (concurrent reads)
 
@@ -413,7 +377,7 @@ Likely fix:
   lock-free.
 - Alternatively, expose a borrowed snapshot resolver for read-heavy passes.
 
-### 12. Slot Chunks Over-Provision For Token Children
+### 11. Slot Chunks Over-Provision For Token Children
 
 **Severity:** Memory performance concern
 
@@ -440,7 +404,7 @@ Likely fix:
   `GreenNodeStorage` for wide nodes). Adds one indirection per realization,
   saves memory proportional to token density.
 
-### 13. `GreenSnapshotEncoder.collect` Allocates Canonical Nodes Before Dedup Check
+### 12. `GreenSnapshotEncoder.collect` Allocates Canonical Nodes Before Dedup Check
 
 **Severity:** Performance concern (serialization path)
 
@@ -462,7 +426,7 @@ Likely fix:
 - Dedup via a key on `(rawKind, [childIDs])` *before* allocating the canonical
   node.
 
-### 14. `BinaryWriter.bytes` Doesn't Reserve Capacity
+### 13. `BinaryWriter.bytes` Doesn't Reserve Capacity
 
 **Severity:** Minor performance concern
 
@@ -485,7 +449,7 @@ Likely fix:
 - Call `bytes.reserveCapacity(estimatedSize)` once before the body of `encode`,
   with an estimate based on the known record/string counts.
 
-### 15. `RedArena.realizeChildNode` Slow Path Serializes On A Single Mutex
+### 14. `RedArena.realizeChildNode` Slow Path Serializes On A Single Mutex
 
 **Severity:** Performance concern (concurrent traversal)
 
@@ -508,7 +472,7 @@ Likely fix candidates:
 - Thread-local arena that periodically merges into shared state.
 - Benchmark first to confirm contention before changing the model.
 
-### 16. Recursive Traversal Risks Stack Overflow On Pathological Inputs
+### 15. Recursive Traversal Risks Stack Overflow On Pathological Inputs
 
 **Severity:** Robustness concern
 
