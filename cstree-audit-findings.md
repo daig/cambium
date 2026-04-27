@@ -16,27 +16,35 @@ performance risks that should be triaged before or shortly after v1.
   traversal, inconsistent public `GreenToken` construction,
   `firstReusableNode` boundary search lacking early exit and coverage,
   and the snapshot decoder trapping on unknown raw kinds.
+- The overlay-fallback replacement namespace issue has been reclassified from
+  a correctness bug to intentional cache-lineage design debt. See the
+  deferred section below.
 - Remaining findings here are based on code inspection and traced behaviour
   rather than executed tests; treat them as high-confidence but unvalidated
   until tests land.
 
-## Priority 0: Correctness Bugs
+## Deferred Cache-Lineage Design Debt
 
-### 1. Overlay-Fallback Replacement Resolver Loses `tokenKeyNamespace`
+### Overlay-Fallback Replacement Intentionally Severs Cache Namespace
 
-**Severity:** Medium
+**Status:** Intentional safe fallback; revisit when cache lineage is redesigned.
 
 **Area:** `OverlayTokenResolver`, the cross-namespace overlay fallback in
 `SharedSyntaxTree.replacing(_:with: ResolvedGreenNode, cache:)`
 
-The cache-compatible replacement paths now snapshot the cache's interner for
-the result resolver, preserving `tokenKeyNamespace`. The remaining gap is the
-overlay fallback taken when neither the replacement nor the cache shares the
-target tree's namespace: that path returns an `OverlayTokenResolver` whose
-`tokenKeyNamespace` is `nil`, so subsequent `reuseSubtree` calls from the
-result tree fail the namespace check (`sourceNamespace ===
-cacheStorage.interner.tokenKeyNamespace`) and pay the `.remapped` rebuild
-cost — forever.
+When neither the replacement nor the provided cache shares the target tree's
+namespace, replacement falls back to an `OverlayTokenResolver`. The overlay
+remaps replacement dynamic token keys into resolver-local synthetic raw keys
+above the target tree's existing maxima, preserving structural sharing for
+unchanged subtrees and avoiding cache pollution with synthetic identities.
+
+The overlay intentionally reports `tokenKeyNamespace == nil`. Its synthetic
+keys are stored in overlay dictionaries, not in the target cache/interner.
+Exposing the target namespace would make `reuseSubtree` direct-reuse green
+nodes whose token keys a later cache snapshot cannot resolve, which is
+unsound. The safe consequence is that subsequent `reuseSubtree` calls from the
+overlay-backed result tree take the `.remapped` path until a larger cache
+lineage redesign provides a coherent resolver/cache pair.
 
 Relevant code:
 
@@ -48,22 +56,22 @@ Relevant code:
 
 Why it matters:
 
-- A long edit session that lands in the overlay fallback never recovers the
-  fast-path even after a subsequent compatible-cache replacement, because the
-  tree carrying the nil-namespace overlay becomes the next operation's
-  `target`.
+- A long edit session that lands in the overlay fallback can lose fast-path
+  reuse until replacement/build APIs provide a returned cache whose interner
+  contains every dynamic key referenced by the result tree.
 - Hard to diagnose without comparing `SubtreeReuseOutcome` rates across
   parses.
 
-Likely fix:
+Deferred direction:
 
-- Expose the *target tree's* namespace on the overlay (since overlay keys are
-  drawn above the target's existing keys, they live in the same namespace as
-  the base) so the namespace check can match.
-- Or merge the overlay's mappings into a fresh `TokenTextSnapshot` at
-  replacement time, which preserves namespace at the cost of a copy.
+- Do not expose the target namespace from `OverlayTokenResolver` unless the
+  matching cache/interner can resolve the overlay's synthetic keys.
+- Revisit this as part of the broader cache-lineage redesign, likely by adding
+  an API that returns a coherent result cache/interner alongside the tree.
 
-### 2. Node-Cache Eviction Undercounts Hash-Bucket Entries
+## Priority 0: Correctness Bugs
+
+### 1. Node-Cache Eviction Undercounts Hash-Bucket Entries
 
 **Severity:** Medium-Low
 
@@ -100,7 +108,7 @@ Likely fix:
 
 ## Priority 1: Performance Risks
 
-### 3. Green Cache Hits Still Allocate Candidate Nodes First
+### 2. Green Cache Hits Still Allocate Candidate Nodes First
 
 **Severity:** Major performance concern
 
@@ -140,7 +148,7 @@ Measurement target:
   confirm allocation count drops on cache hits.
 - Benchmark replacement in wide shallow nodes and deep narrow nodes.
 
-### 4. String Materialization Decodes And Reallocates Per Chunk
+### 3. String Materialization Decodes And Reallocates Per Chunk
 
 **Severity:** Major performance concern
 
@@ -179,7 +187,7 @@ Measurement target:
   same total byte count.
 - Track allocations and wall time before/after a byte-buffer sink.
 
-### 5. `withDescendant(atPath:)` Triggers O(childIndex) Per Step On First Realization
+### 4. `withDescendant(atPath:)` Triggers O(childIndex) Per Step On First Realization
 
 **Severity:** Performance concern (cold path)
 
@@ -208,7 +216,7 @@ Likely fix:
 - Thread `childStart` through the loop in `withDescendant(atPath:)`, matching
   the pattern used by sibling and child traversal helpers.
 
-### 6. Token Interners Allocate `[UInt8]` On Every Lookup
+### 5. Token Interners Allocate `[UInt8]` On Every Lookup
 
 **Severity:** Major performance concern (hot path)
 
@@ -237,7 +245,7 @@ Measurement target:
 - Allocation count per `intern` call drops on cache hits.
 - Steady-state interning throughput improves on token-dense input.
 
-### 7. `SharedTokenInterner.resolve` Locks The Shard On Every Read
+### 6. `SharedTokenInterner.resolve` Locks The Shard On Every Read
 
 **Severity:** Performance concern (concurrent reads)
 
@@ -264,7 +272,7 @@ Likely fix:
   lock-free.
 - Alternatively, expose a borrowed snapshot resolver for read-heavy passes.
 
-### 8. Slot Chunks Over-Provision For Token Children
+### 7. Slot Chunks Over-Provision For Token Children
 
 **Severity:** Memory performance concern
 
@@ -291,7 +299,7 @@ Likely fix:
   `GreenNodeStorage` for wide nodes). Adds one indirection per realization,
   saves memory proportional to token density.
 
-### 9. `GreenSnapshotEncoder.collect` Allocates Canonical Nodes Before Dedup Check
+### 8. `GreenSnapshotEncoder.collect` Allocates Canonical Nodes Before Dedup Check
 
 **Severity:** Performance concern (serialization path)
 
@@ -313,7 +321,7 @@ Likely fix:
 - Dedup via a key on `(rawKind, [childIDs])` *before* allocating the canonical
   node.
 
-### 10. `BinaryWriter.bytes` Doesn't Reserve Capacity
+### 9. `BinaryWriter.bytes` Doesn't Reserve Capacity
 
 **Severity:** Minor performance concern
 
@@ -336,7 +344,7 @@ Likely fix:
 - Call `bytes.reserveCapacity(estimatedSize)` once before the body of `encode`,
   with an estimate based on the known record/string counts.
 
-### 11. `RedArena.realizeChildNode` Slow Path Serializes On A Single Mutex
+### 10. `RedArena.realizeChildNode` Slow Path Serializes On A Single Mutex
 
 **Severity:** Performance concern (concurrent traversal)
 
@@ -359,7 +367,7 @@ Likely fix candidates:
 - Thread-local arena that periodically merges into shared state.
 - Benchmark first to confirm contention before changing the model.
 
-### 12. Recursive Traversal Risks Stack Overflow On Pathological Inputs
+### 11. Recursive Traversal Risks Stack Overflow On Pathological Inputs
 
 **Severity:** Robustness concern
 

@@ -630,6 +630,10 @@ final class OverlayTokenResolver: TokenResolver, @unchecked Sendable {
     private let base: any TokenResolver
     private let interned: [TokenKey: String]
     private let large: [LargeTokenTextID: String]
+    // Overlay keys are resolver-local synthetic keys, not entries in the
+    // base/cache interner. Advertising the base namespace would let
+    // `reuseSubtree` direct-reuse green nodes whose keys a later cache
+    // snapshot cannot resolve.
     let tokenKeyNamespace: TokenKeyNamespace? = nil
 
     init(
@@ -1238,6 +1242,13 @@ public extension SharedSyntaxTree {
     /// a fresher snapshot of the same shared interner, rendering may
     /// precondition-fail on keys that postdate this tree's snapshot. Pass
     /// a namespace-matching cache to avoid this.
+    ///
+    /// If neither the replacement nor the cache shares this tree's namespace,
+    /// replacement falls back to an overlay resolver. That fallback preserves
+    /// structural sharing and correctness, but intentionally exposes no
+    /// `tokenKeyNamespace`; future `reuseSubtree` calls with a cache must
+    /// remap dynamic token keys instead of direct-reusing the overlay-backed
+    /// green storage. Revisit this with the broader cache-lineage redesign.
     func replacing(
         _ handle: SyntaxNodeHandle<Lang>,
         with replacement: ResolvedGreenNode<Lang>,
@@ -1354,6 +1365,8 @@ public extension SharedSyntaxTree {
         // rebuilt ancestors intentionally bypass `GreenNodeCache`: the overlay
         // keys are resolver-local and caching them would make unrelated
         // replacements with equal raw synthetic keys share green identity.
+        // The resulting resolver exposes no namespace because no matching
+        // cache/interner can resolve those synthetic overlay keys.
         let candidateRoot = try rebuildReplacingDirect(
             root: oldRoot,
             path: ArraySlice(replacedPath),
