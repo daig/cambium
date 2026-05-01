@@ -148,6 +148,28 @@ struct CalculatorREPL {
                 continue
             }
 
+            if trimmed == ":at" {
+                print("error: usage is :at <offset>")
+                continue
+            }
+
+            if trimmed.hasPrefix(":at ") {
+                let body = String(trimmed.dropFirst(":at ".count))
+                printTokenAtOffset(body, in: lastResult)
+                continue
+            }
+
+            if trimmed == ":cover" {
+                print("error: usage is :cover <start>..<end>")
+                continue
+            }
+
+            if trimmed.hasPrefix(":cover ") {
+                let body = String(trimmed.dropFirst(":cover ".count))
+                printCoveringElement(body, in: lastResult)
+                continue
+            }
+
             if trimmed.hasPrefix(":edit ") {
                 let body = String(trimmed.dropFirst(":edit ".count))
                 guard let parsed = parseEditCommand(body) else {
@@ -200,6 +222,8 @@ struct CalculatorREPL {
         commands:
           <expression>                replace document and evaluate
           :edit <start>..<end> <text> apply a byte-range edit and reparse
+          :at <offset>                show token ownership at a byte offset
+          :cover <start>..<end>       show smallest element covering a byte range
           :show                       show current document and re-evaluate
           :save <path>                write current clean tree snapshot
           :load <path>                load a tree snapshot as the document
@@ -262,6 +286,89 @@ struct CalculatorREPL {
         } catch {
             print("internal error: \(error)")
         }
+    }
+
+    private static func printTokenAtOffset(
+        _ body: String,
+        in lastResult: CalculatorParseResult?
+    ) {
+        guard let lastResult else {
+            print("(no document parsed yet)")
+            return
+        }
+
+        let offsetText = body.trimmingCharacters(in: .whitespaces)
+        guard let rawOffset = UInt32(offsetText) else {
+            print("error: usage is :at <offset>")
+            return
+        }
+
+        let offset = TextSize(rawOffset)
+        lastResult.tree.withRoot { root in
+            root.withTokenAtOffset(
+                offset,
+                none: {
+                    print("(no token at offset \(rawOffset))")
+                },
+                single: { token in
+                    print("single: \(describeToken(token))")
+                },
+                between: { left, right in
+                    print("between: \(describeTokenBoundary(left)) | \(describeTokenBoundary(right))")
+                }
+            )
+        }
+    }
+
+    private static func printCoveringElement(
+        _ body: String,
+        in lastResult: CalculatorParseResult?
+    ) {
+        guard let lastResult else {
+            print("(no document parsed yet)")
+            return
+        }
+
+        let rangeText = body.trimmingCharacters(in: .whitespaces)
+        guard let byteRange = parseByteRange(rangeText) else {
+            print("error: usage is :cover <start>..<end>")
+            return
+        }
+
+        let range = TextRange(
+            start: TextSize(UInt32(byteRange.start)),
+            end: TextSize(UInt32(byteRange.end))
+        )
+        let result: String? = lastResult.tree.withRoot { root in
+            root.withCoveringElement(range) { element in
+                describeElement(element)
+            }
+        }
+
+        print(result ?? "(no element covers \(format(range)))")
+    }
+
+    private static func describeElement(
+        _ element: borrowing SyntaxElementCursor<CalculatorLanguage>
+    ) -> String {
+        switch element {
+        case .node(let node):
+            "node: \(CalculatorLanguage.name(for: node.kind)) \(format(node.textRange))"
+        case .token(let token):
+            "token: \(describeToken(token))"
+        }
+    }
+
+    private static func describeToken(
+        _ token: borrowing SyntaxTokenCursor<CalculatorLanguage>
+    ) -> String {
+        "\(describeTokenBoundary(token)) \"\(escaped(token.makeString()))\""
+    }
+
+    private static func describeTokenBoundary(
+        _ token: borrowing SyntaxTokenCursor<CalculatorLanguage>
+    ) -> String {
+        "\(CalculatorLanguage.name(for: token.kind)) \(format(token.textRange))"
     }
 
     private static func foldAndPrint(
@@ -393,6 +500,11 @@ private struct ParsedEdit {
     var replacement: String
 }
 
+private struct ParsedByteRange {
+    var start: Int
+    var end: Int
+}
+
 private func parseEditCommand(_ body: String) -> ParsedEdit? {
     // Form: "<digits>..<digits>[ <replacement-rest-of-line>]"
     // The replacement is everything after the first space following the range.
@@ -411,16 +523,29 @@ private func parseEditCommand(_ body: String) -> ParsedEdit? {
         replacement = ""
     }
 
-    let pieces = rangePart.components(separatedBy: "..")
+    guard let range = parseByteRange(String(rangePart)) else {
+        return nil
+    }
+    return ParsedEdit(start: range.start, end: range.end, replacement: replacement)
+}
+
+private func parseByteRange(_ text: String) -> ParsedByteRange? {
+    let trimmed = text.trimmingCharacters(in: .whitespaces)
+    let pieces: [String]
+    if trimmed.contains("..<") {
+        pieces = trimmed.components(separatedBy: "..<")
+    } else {
+        pieces = trimmed.components(separatedBy: "..")
+    }
+
     guard pieces.count == 2,
-          let start = Int(pieces[0]),
-          let end = Int(pieces[1]),
-          start >= 0,
+          let start = UInt32(pieces[0].trimmingCharacters(in: .whitespaces)),
+          let end = UInt32(pieces[1].trimmingCharacters(in: .whitespaces)),
           end >= start
     else {
         return nil
     }
-    return ParsedEdit(start: start, end: end, replacement: replacement)
+    return ParsedByteRange(start: Int(start), end: Int(end))
 }
 
 private func applyEdit(_ edit: TextEdit, to source: String) -> String? {

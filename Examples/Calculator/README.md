@@ -19,9 +19,42 @@ swift run calc-repl
 
 REPL commands:
 
+- `<expression>` replaces the current document and evaluates it.
+- `:edit <start>..<end> <text>` applies a byte-range edit and reparses.
+- `:at <offset>` shows which token owns a byte offset, or the adjacent token
+  pair at a token boundary.
+- `:cover <start>..<end>` shows the smallest node or token covering a byte
+  range.
+- `:show` prints the current document and re-evaluates it.
+- `:save <path>` writes the current clean tree as a Cambium green snapshot.
+- `:load <path>` loads a Cambium green snapshot as the current document.
 - `:tree` toggles CST dumps.
 - `:ast` toggles typed AST dumps.
 - `:fold` constant-folds the current document one replacement at a time and
   prints each `ReplacementWitness` classification demo.
+- `:counters` prints incremental reuse counters.
+- `:reset` drops the current session state.
 - `:help` prints commands.
 - `:q` or `:quit` exits.
+
+## Position Queries
+
+`:at` and `:cover` run against the most recently parsed tree, including trees
+with diagnostics. A few useful probes:
+
+```text
+calc> 1+2
+3
+calc> :at 1
+between: number 0..<1 | plus 1..<2
+calc> :at 3
+single: number 2..<3 "2"
+calc> :cover 0..<1
+token: number 0..<1 "1"
+calc> :cover 0..<3
+node: binaryExpr 0..<3
+calc> (1
+error: expected ')' at 2..<2
+calc> :at 2
+single: rightParen 2..<2 ""
+```
