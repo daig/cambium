@@ -6,6 +6,7 @@ import XCTest
 final class CambiumSyntaxKindExpansionTests: XCTestCase {
     private let testMacros: [String: Macro.Type] = [
         "CambiumSyntaxKind": CambiumSyntaxKindMacro.self,
+        "CambiumSyntaxNode": CambiumSyntaxNodeMacro.self,
         "StaticText": StaticTextMacro.self,
     ]
 
@@ -54,6 +55,98 @@ final class CambiumSyntaxKindExpansionTests: XCTestCase {
                         "plus"
                     case .identifier:
                         "identifier"
+                    }
+                }
+            }
+            """,
+            macros: testMacros
+        )
+    }
+
+    func testSyntaxKindExpansionPropagatesPublicAccess() {
+        assertMacroExpansion(
+            """
+            @CambiumSyntaxKind
+            public enum MacroKind: UInt32 {
+                case root = 1
+                @StaticText("+")
+                case plus = 2
+                case identifier = 3
+            }
+            """,
+            expandedSource:
+            """
+            public enum MacroKind: UInt32 {
+                case root = 1
+                case plus = 2
+                case identifier = 3
+            }
+
+            extension MacroKind: CambiumCore.SyntaxKind {
+                public static func rawKind(for kind: Self) -> CambiumCore.RawSyntaxKind {
+                    CambiumCore.RawSyntaxKind(kind.rawValue)
+                }
+                public static func kind(for raw: CambiumCore.RawSyntaxKind) -> Self {
+                    guard let kind = Self(rawValue: raw.rawValue) else {
+                        preconditionFailure("Unknown raw syntax kind \\(raw.rawValue) for MacroKind")
+                    }
+                    return kind
+                }
+                public static func staticText(for kind: Self) -> StaticString? {
+                    switch kind {
+                    case .plus:
+                        "+"
+                    default:
+                        nil
+                    }
+                }
+                public static func name(for kind: Self) -> String {
+                    switch kind {
+                    case .root:
+                        "root"
+                    case .plus:
+                        "plus"
+                    case .identifier:
+                        "identifier"
+                    }
+                }
+            }
+            """,
+            macros: testMacros
+        )
+    }
+
+    func testSyntaxKindExpansionPropagatesPackageAccess() {
+        assertMacroExpansion(
+            """
+            @CambiumSyntaxKind
+            package enum MacroKind: UInt32 {
+                case root = 1
+            }
+            """,
+            expandedSource:
+            """
+            package enum MacroKind: UInt32 {
+                case root = 1
+            }
+
+            extension MacroKind: CambiumCore.SyntaxKind {
+                package static func rawKind(for kind: Self) -> CambiumCore.RawSyntaxKind {
+                    CambiumCore.RawSyntaxKind(kind.rawValue)
+                }
+                package static func kind(for raw: CambiumCore.RawSyntaxKind) -> Self {
+                    guard let kind = Self(rawValue: raw.rawValue) else {
+                        preconditionFailure("Unknown raw syntax kind \\(raw.rawValue) for MacroKind")
+                    }
+                    return kind
+                }
+                package static func staticText(for kind: Self) -> StaticString? {
+                    nil
+                }
+                package static func name(for kind: Self) -> String {
+                    switch kind {
+                    case .root:
+                        "root"
                     }
                 }
             }
@@ -176,4 +269,105 @@ final class CambiumSyntaxKindExpansionTests: XCTestCase {
             macros: testMacros
         )
     }
+
+    func testSyntaxNodeExpansion() {
+        assertMacroExpansion(
+            """
+            @CambiumSyntaxNode(CalculatorKind.self, for: .integerExpr)
+            public struct IntegerExprSyntax: CalculatorSyntaxNode {
+                public var literal: CalculatorTokenSyntax? {
+                    nil
+                }
+            }
+            """,
+            expandedSource:
+            """
+            public struct IntegerExprSyntax: CalculatorSyntaxNode {
+                public var literal: CalculatorTokenSyntax? {
+                    nil
+                }
+
+                public static let kind: CalculatorKind = .integerExpr
+
+                public let syntax: CambiumCore.SyntaxNodeHandle<Lang>
+
+                public init(unchecked syntax: CambiumCore.SyntaxNodeHandle<Lang>) {
+                    self.syntax = syntax
+                }
+            }
+            """,
+            macros: testMacros
+        )
+    }
+
+    func testSyntaxNodeExpansionUsesInternalAccessByDefault() {
+        assertMacroExpansion(
+            """
+            @CambiumSyntaxNode(CalculatorKind.self, for: .integerExpr)
+            struct IntegerExprSyntax: CalculatorSyntaxNode {
+            }
+            """,
+            expandedSource:
+            """
+            struct IntegerExprSyntax: CalculatorSyntaxNode {
+
+                static let kind: CalculatorKind = .integerExpr
+
+                let syntax: CambiumCore.SyntaxNodeHandle<Lang>
+
+                init(unchecked syntax: CambiumCore.SyntaxNodeHandle<Lang>) {
+                    self.syntax = syntax
+                }
+            }
+            """,
+            macros: testMacros
+        )
+    }
+
+    func testSyntaxNodeRejectsNonStructTargets() {
+        assertMacroExpansion(
+            """
+            @CambiumSyntaxNode(CalculatorKind.self, for: .integerExpr)
+            enum IntegerExprSyntax {
+            }
+            """,
+            expandedSource:
+            """
+            enum IntegerExprSyntax {
+            }
+            """,
+            diagnostics: [
+                DiagnosticSpec(
+                    message: "@CambiumSyntaxNode can only be attached to a struct",
+                    line: 1,
+                    column: 1
+                ),
+            ],
+            macros: testMacros
+        )
+    }
+
+    func testSyntaxNodeRejectsInvalidArguments() {
+        assertMacroExpansion(
+            """
+            @CambiumSyntaxNode(for: .integerExpr)
+            struct IntegerExprSyntax: CalculatorSyntaxNode {
+            }
+            """,
+            expandedSource:
+            """
+            struct IntegerExprSyntax: CalculatorSyntaxNode {
+            }
+            """,
+            diagnostics: [
+                DiagnosticSpec(
+                    message: "@CambiumSyntaxNode requires arguments '<Kind>.self, for: <kind>'",
+                    line: 1,
+                    column: 1
+                ),
+            ],
+            macros: testMacros
+        )
+    }
+
 }

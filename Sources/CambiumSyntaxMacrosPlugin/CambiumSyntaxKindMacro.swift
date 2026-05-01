@@ -37,20 +37,20 @@ public struct CambiumSyntaxKindMacro: ExtensionMacro {
             return []
         }
 
-        let access = enumDecl.generatedExtensionAccess
+        let access = enumDecl.generatedMemberAccess
         let cases = collection.cases
         return [
-            try ExtensionDeclSyntax("\(raw: access)extension \(type.trimmed): CambiumCore.SyntaxKind") {
+            try ExtensionDeclSyntax("extension \(type.trimmed): CambiumCore.SyntaxKind") {
                 DeclSyntax(
                     """
-                    static func rawKind(for kind: Self) -> CambiumCore.RawSyntaxKind {
+                    \(raw: access)static func rawKind(for kind: Self) -> CambiumCore.RawSyntaxKind {
                         CambiumCore.RawSyntaxKind(kind.rawValue)
                     }
                     """
                 )
                 DeclSyntax(
                     """
-                    static func kind(for raw: CambiumCore.RawSyntaxKind) -> Self {
+                    \(raw: access)static func kind(for raw: CambiumCore.RawSyntaxKind) -> Self {
                         guard let kind = Self(rawValue: raw.rawValue) else {
                             preconditionFailure("Unknown raw syntax kind \\(raw.rawValue) for \(raw: type.cambiumTrimmedDescription)")
                         }
@@ -58,8 +58,8 @@ public struct CambiumSyntaxKindMacro: ExtensionMacro {
                     }
                     """
                 )
-                DeclSyntax(stringLiteral: staticTextFunction(cases: cases))
-                DeclSyntax(stringLiteral: nameFunction(cases: cases))
+                DeclSyntax(stringLiteral: staticTextFunction(access: access, cases: cases))
+                DeclSyntax(stringLiteral: nameFunction(access: access, cases: cases))
             },
         ]
     }
@@ -139,7 +139,7 @@ public struct CambiumSyntaxKindMacro: ExtensionMacro {
         return (result, hasErrors)
     }
 
-    private static func staticTextFunction(cases: [SyntaxKindCase]) -> String {
+    private static func staticTextFunction(access: String, cases: [SyntaxKindCase]) -> String {
         let staticCases = cases.compactMap { syntaxCase -> String? in
             guard let staticText = syntaxCase.staticText else {
                 return nil
@@ -152,14 +152,14 @@ public struct CambiumSyntaxKindMacro: ExtensionMacro {
 
         guard !staticCases.isEmpty else {
             return """
-            static func staticText(for kind: Self) -> StaticString? {
+            \(access)static func staticText(for kind: Self) -> StaticString? {
                 nil
             }
             """
         }
 
         return """
-        static func staticText(for kind: Self) -> StaticString? {
+        \(access)static func staticText(for kind: Self) -> StaticString? {
             switch kind {
         \(staticCases.joined(separator: "\n"))
             default:
@@ -169,7 +169,7 @@ public struct CambiumSyntaxKindMacro: ExtensionMacro {
         """
     }
 
-    private static func nameFunction(cases: [SyntaxKindCase]) -> String {
+    private static func nameFunction(access: String, cases: [SyntaxKindCase]) -> String {
         let caseBranches = cases
             .map { syntaxCase in
                 """
@@ -180,7 +180,7 @@ public struct CambiumSyntaxKindMacro: ExtensionMacro {
             .joined(separator: "\n")
 
         return """
-        static func name(for kind: Self) -> String {
+        \(access)static func name(for kind: Self) -> String {
             switch kind {
         \(caseBranches)
             }
@@ -328,14 +328,8 @@ private extension AttributeSyntax {
     }
 }
 
-private extension EnumDeclSyntax {
-    func hasRawType(named rawTypeName: String) -> Bool {
-        inheritanceClause?.inheritedTypes.contains { inheritedType in
-            inheritedType.type.cambiumTrimmedDescription == rawTypeName
-        } ?? false
-    }
-
-    var generatedExtensionAccess: String {
+private extension DeclGroupSyntax {
+    var generatedMemberAccess: String {
         for modifier in modifiers {
             switch modifier.name.text {
             case "public", "package":
@@ -345,6 +339,14 @@ private extension EnumDeclSyntax {
             }
         }
         return ""
+    }
+}
+
+private extension EnumDeclSyntax {
+    func hasRawType(named rawTypeName: String) -> Bool {
+        inheritanceClause?.inheritedTypes.contains { inheritedType in
+            inheritedType.type.cambiumTrimmedDescription == rawTypeName
+        } ?? false
     }
 }
 

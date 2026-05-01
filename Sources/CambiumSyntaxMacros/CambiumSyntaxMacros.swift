@@ -62,3 +62,29 @@ public macro CambiumSyntaxKind() =
 @attached(peer)
 public macro StaticText(_ text: StaticString) =
     #externalMacro(module: "CambiumSyntaxMacrosPlugin", type: "StaticTextMacro")
+
+/// Generate the standard stored syntax handle and unchecked initializer for a
+/// concrete typed syntax-node wrapper.
+///
+/// Apply this to a struct that conforms to a grammar-specific syntax-node
+/// protocol whose `Lang` associated type is fixed. The generated members are:
+///
+/// - `static let kind: Kind`
+/// - `let syntax: SyntaxNodeHandle<Lang>`
+/// - `init(unchecked syntax: SyntaxNodeHandle<Lang>)`
+///
+/// ## Example
+///
+/// ```swift
+/// @CambiumSyntaxNode(CalculatorKind.self, for: .integerExpr)
+/// public struct IntegerExprSyntax: CalculatorSyntaxNode {
+///     public var literal: CalculatorTokenSyntax? {
+///         firstToken(kind: .number)
+///     }
+/// }
+/// ```
+@attached(member, names: named(kind), named(syntax), named(`init`), arbitrary)
+public macro CambiumSyntaxNode<Kind>(
+    _ kindType: Kind.Type,
+    for kind: Kind
+) = #externalMacro(module: "CambiumSyntaxMacrosPlugin", type: "CambiumSyntaxNodeMacro")
