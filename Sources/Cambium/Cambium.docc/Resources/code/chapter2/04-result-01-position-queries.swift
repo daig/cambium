@@ -1,6 +1,14 @@
 // CalculatorParseResult.swift
+//
+// Lifted from CalculatorParser.swift into its own file. We grow it
+// here with query helpers built on the borrowed-cursor APIs.
 
 import Cambium
+
+public struct CalculatorParseResult: Sendable {
+    public let tree: SharedSyntaxTree<CalculatorLanguage>
+    public let diagnostics: [Diagnostic<CalculatorLanguage>]
+}
 
 public extension CalculatorParseResult {
     /// What does the parser think about a single byte position?

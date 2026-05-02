@@ -3,6 +3,17 @@
 import Cambium
 import Foundation
 
+/// Serialize `tree` and write the bytes to `url`. The output format
+/// is length-, hash-, and kind-validated — bad snapshots are
+/// rejected at decode time with named errors.
+public func saveCalculatorTree(
+    _ tree: SharedSyntaxTree<CalculatorLanguage>,
+    to url: URL
+) throws {
+    let bytes = try tree.serializeGreenSnapshot()
+    try Data(bytes).write(to: url)
+}
+
 /// Decode a previously-serialized snapshot from `url` and project
 /// it into a `SharedSyntaxTree`. The decoder validates the entire
 /// payload (length headers, per-record kinds, structural hash) and

@@ -2,16 +2,55 @@
 
 import Cambium
 
-// ... `evaluateCalculatorTree` and `CalculatorEvaluator` from prior steps ...
+public func evaluateCalculatorTree(
+    _ tree: SharedSyntaxTree<CalculatorLanguage>
+) throws -> CalculatorValue {
+    var evaluator = CalculatorEvaluator()
+    return try evaluator.evaluateTree(tree)
+}
 
-internal extension CalculatorEvaluator {
+internal struct CalculatorEvaluator {
+    /// Open the tree, project the root through `RootSyntax`, and
+    /// evaluate the (single) root expression.
+    mutating func evaluateTree(
+        _ tree: SharedSyntaxTree<CalculatorLanguage>
+    ) throws -> CalculatorValue {
+        try tree.withRoot { root in
+            guard let root = RootSyntax(root.makeHandle()) else {
+                throw CalculatorEvaluationError.unsupportedSyntax(
+                    CalculatorLanguage.name(for: root.kind),
+                    root.textRange
+                )
+            }
+            let expressions = root.expressions
+            guard let only = expressions.first, expressions.count == 1 else {
+                throw CalculatorEvaluationError.unsupportedSyntax(
+                    "expected a single root expression",
+                    root.range
+                )
+            }
+            return try evaluate(only)
+        }
+    }
+
+    mutating func evaluate(_ expression: ExprSyntax) throws -> CalculatorValue {
+        switch expression {
+        case .integer(let expression): try evaluateInteger(expression)
+        case .real(let expression): try evaluateReal(expression)
+        case .unary(let expression): try evaluateUnary(expression)
+        case .binary(let expression): try evaluateBinary(expression)
+        case .group(let expression): try evaluateGroup(expression)
+        case .roundCall(let expression): try evaluateRoundCall(expression)
+        }
+    }
+
     /// Parse the integer literal directly from the token's UTF-8 bytes.
     ///
     /// `withTextUTF8` exposes the token's bytes through a borrowed
     /// buffer pointer — there is no `String` allocation per token.
     /// `parseInt64` accumulates digits with overflow checks; on the
     /// rare error path we materialize `text` for the diagnostic.
-    func evaluateInteger(_ expression: IntegerExprSyntax) throws -> CalculatorValue {
+    private mutating func evaluateInteger(_ expression: IntegerExprSyntax) throws -> CalculatorValue {
         guard let token = expression.literal else {
             throw CalculatorEvaluationError.unsupportedSyntax(
                 "missing integer literal", expression.range
@@ -32,7 +71,7 @@ internal extension CalculatorEvaluator {
     /// from-bytes parser. We still avoid `token.makeString()` on the
     /// happy path by going through `withTextUTF8` and decoding the
     /// borrowed slice directly.
-    func evaluateReal(_ expression: RealExprSyntax) throws -> CalculatorValue {
+    private mutating func evaluateReal(_ expression: RealExprSyntax) throws -> CalculatorValue {
         guard let token = expression.literal else {
             throw CalculatorEvaluationError.unsupportedSyntax(
                 "missing real literal", expression.range
@@ -46,6 +85,12 @@ internal extension CalculatorEvaluator {
         }
         return .real(expression.minusSign != nil ? -value : value)
     }
+
+    // Compound evaluators filled in by the next step.
+    private mutating func evaluateUnary(_ expression: UnaryExprSyntax) throws -> CalculatorValue { fatalError() }
+    private mutating func evaluateBinary(_ expression: BinaryExprSyntax) throws -> CalculatorValue { fatalError() }
+    private mutating func evaluateGroup(_ expression: GroupExprSyntax) throws -> CalculatorValue { fatalError() }
+    private mutating func evaluateRoundCall(_ expression: RoundCallExprSyntax) throws -> CalculatorValue { fatalError() }
 }
 
 internal func parseInt64(asciiDigits bytes: UnsafeBufferPointer<UInt8>) -> Int64? {

@@ -3,7 +3,121 @@
 import Cambium
 import CambiumSyntaxMacros
 
-// ... protocol, token wrapper, and per-kind structs from prior steps ...
+public protocol CalculatorSyntaxNode: TypedSyntaxNode, Sendable, Hashable
+    where Lang == CalculatorLanguage
+{
+    static var kind: CalculatorKind { get }
+    var syntax: SyntaxNodeHandle<CalculatorLanguage> { get }
+    init(unchecked syntax: SyntaxNodeHandle<CalculatorLanguage>)
+}
+
+public extension CalculatorSyntaxNode {
+    static var rawKind: RawSyntaxKind {
+        CalculatorLanguage.rawKind(for: kind)
+    }
+
+    init?(_ syntax: SyntaxNodeHandle<CalculatorLanguage>) {
+        guard syntax.rawKind == Self.rawKind else { return nil }
+        self.init(unchecked: syntax)
+    }
+
+    var range: TextRange {
+        syntax.textRange
+    }
+}
+
+public struct CalculatorTokenSyntax: Sendable, Hashable {
+    public let syntax: SyntaxTokenHandle<CalculatorLanguage>
+
+    public init(_ syntax: SyntaxTokenHandle<CalculatorLanguage>) {
+        self.syntax = syntax
+    }
+
+    public var kind: CalculatorKind {
+        syntax.withCursor { $0.kind }
+    }
+
+    public var range: TextRange {
+        syntax.withCursor { $0.textRange }
+    }
+
+    public var text: String {
+        syntax.withCursor { $0.makeString() }
+    }
+
+    public func withTextUTF8<R>(
+        _ body: (UnsafeBufferPointer<UInt8>) throws -> R
+    ) throws -> R {
+        try syntax.withCursor { token in
+            try token.withTextUTF8(body)
+        }
+    }
+}
+
+public enum CalculatorBinaryOperator: Sendable, Hashable {
+    case add, subtract, multiply, divide
+
+    init?(_ kind: CalculatorKind) {
+        switch kind {
+        case .plus: self = .add
+        case .minus: self = .subtract
+        case .star: self = .multiply
+        case .slash: self = .divide
+        default: return nil
+        }
+    }
+}
+
+public struct CalculatorBinaryOperatorTokenSyntax: Sendable, Hashable {
+    public let token: CalculatorTokenSyntax
+    public let operatorKind: CalculatorBinaryOperator
+
+    public init?(_ token: CalculatorTokenSyntax) {
+        guard let operatorKind = CalculatorBinaryOperator(token.kind) else {
+            return nil
+        }
+        self.token = token
+        self.operatorKind = operatorKind
+    }
+
+    public var range: TextRange { token.range }
+}
+
+@CambiumSyntaxNode(CalculatorKind.self, for: .integerExpr)
+public struct IntegerExprSyntax: CalculatorSyntaxNode {
+    public var literal: CalculatorTokenSyntax? { firstToken(kind: .number) }
+    public var minusSign: CalculatorTokenSyntax? { firstToken(kind: .minus) }
+}
+
+@CambiumSyntaxNode(CalculatorKind.self, for: .realExpr)
+public struct RealExprSyntax: CalculatorSyntaxNode {
+    public var literal: CalculatorTokenSyntax? { firstToken(kind: .realNumber) }
+    public var minusSign: CalculatorTokenSyntax? { firstToken(kind: .minus) }
+}
+
+@CambiumSyntaxNode(CalculatorKind.self, for: .unaryExpr)
+public struct UnaryExprSyntax: CalculatorSyntaxNode {
+    public var operand: ExprSyntax? { expression(at: 0) }
+}
+
+@CambiumSyntaxNode(CalculatorKind.self, for: .binaryExpr)
+public struct BinaryExprSyntax: CalculatorSyntaxNode {
+    public var lhs: ExprSyntax? { expression(at: 0) }
+    public var rhs: ExprSyntax? { expression(at: 1) }
+    public var operatorToken: CalculatorBinaryOperatorTokenSyntax? {
+        binaryOperatorToken()
+    }
+}
+
+@CambiumSyntaxNode(CalculatorKind.self, for: .groupExpr)
+public struct GroupExprSyntax: CalculatorSyntaxNode {
+    public var expression: ExprSyntax? { expression(at: 0) }
+}
+
+@CambiumSyntaxNode(CalculatorKind.self, for: .roundCallExpr)
+public struct RoundCallExprSyntax: CalculatorSyntaxNode {
+    public var argument: ExprSyntax? { expression(at: 0) }
+}
 
 /// Tagged union over the six expression kinds. The natural "what kind
 /// of expression is this?" entry point — pattern matching on this
@@ -51,5 +165,53 @@ public struct RootSyntax: CalculatorSyntaxNode {
     /// gracefully report on whatever shape arrived.
     public var expressions: [ExprSyntax] {
         expressionChildren()
+    }
+}
+
+internal extension CalculatorSyntaxNode {
+    func expressionChildren() -> [ExprSyntax] {
+        syntax.withCursor { node in
+            var expressions: [ExprSyntax] = []
+            node.forEachChild { child in
+                if let expression = ExprSyntax(child.makeHandle()) {
+                    expressions.append(expression)
+                }
+            }
+            return expressions
+        }
+    }
+
+    func expression(at index: Int) -> ExprSyntax? {
+        let expressions = expressionChildren()
+        guard index >= 0, index < expressions.count else { return nil }
+        return expressions[index]
+    }
+
+    func binaryOperatorToken() -> CalculatorBinaryOperatorTokenSyntax? {
+        guard let token = firstToken(where: { CalculatorBinaryOperator($0) != nil }) else {
+            return nil
+        }
+        return CalculatorBinaryOperatorTokenSyntax(token)
+    }
+
+    func firstToken(kind: CalculatorKind) -> CalculatorTokenSyntax? {
+        firstToken(where: { $0 == kind })
+    }
+
+    private func firstToken(
+        where matches: (CalculatorKind) -> Bool
+    ) -> CalculatorTokenSyntax? {
+        syntax.withCursor { node in
+            var result: CalculatorTokenSyntax?
+            node.forEachChildOrToken { element in
+                switch element {
+                case .token(let token) where result == nil && matches(token.kind):
+                    result = CalculatorTokenSyntax(token.makeHandle())
+                default:
+                    break
+                }
+            }
+            return result
+        }
     }
 }

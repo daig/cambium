@@ -2,14 +2,61 @@
 
 import Cambium
 
-extension CalculatorSession {
-    // The session owns the long-lived `ExternalAnalysisCache` and a
-    // per-pass `SyntaxMetadataStore`. The cache must outlive every
-    // reparse so memoized values can survive across edits; the
-    // metadata store is replaced on each pass because evaluation
-    // order is per-pass-relative.
+public final class CalculatorSession {
+    private var context: GreenTreeContext<CalculatorLanguage>?
+    private var lastTree: SharedSyntaxTree<CalculatorLanguage>?
+    private var lastDiagnostics: [Diagnostic<CalculatorLanguage>] = []
+    private var incremental = IncrementalParseSession<CalculatorLanguage>()
 
-    func evaluate() throws -> CalculatorValue {
+    // Long-lived analysis state. The cache must outlive every reparse
+    // so memoized values can survive across edits; the metadata store
+    // is replaced on each pass because evaluation order is per-pass-
+    // relative.
+    private let evaluationCache = ExternalAnalysisCache<CalculatorLanguage, CalculatorValue>()
+    private var evaluationMetadata = SyntaxMetadataStore<CalculatorLanguage>()
+
+    public init() {}
+
+    public var counters: IncrementalParseCounters {
+        incremental.counters
+    }
+
+    public func parse(
+        _ input: String,
+        edits: [TextEdit] = []
+    ) throws -> SharedSyntaxTree<CalculatorLanguage> {
+        let previousTree = lastTree
+
+        let builder: GreenTreeBuilder<CalculatorLanguage>
+        if let existing = context.take() {
+            builder = GreenTreeBuilder(context: consume existing)
+        } else {
+            builder = GreenTreeBuilder(policy: .parseSession(maxEntries: 16_384))
+        }
+
+        var parser = CalculatorParser(
+            input: input,
+            builder: consume builder,
+            previousTree: previousTree,
+            edits: edits,
+            incremental: incremental
+        )
+        try parser.parse()
+        let output = try parser.finishBuild()
+
+        let tree = output.build.snapshot.makeSyntaxTree().intoShared()
+        let nextContext = output.build.intoContext()
+
+        context = consume nextContext
+        lastTree = tree
+        lastDiagnostics = output.diagnostics
+        return tree
+    }
+
+    /// Evaluate the current tree, memoizing results in the long-lived
+    /// `ExternalAnalysisCache` and recording per-node metadata in a
+    /// fresh `SyntaxMetadataStore`.
+    public func evaluate() throws -> CalculatorValue {
         guard let tree = lastTree else {
             throw CalculatorEvaluationError.invalidSyntax("no current document")
         }
@@ -18,22 +65,17 @@ extension CalculatorSession {
             cache: evaluationCache,
             metadata: evaluationMetadata
         )
-        return try evaluator.evaluate(/* root expression of `tree` */)
+        return try evaluator.evaluateTree(tree)
     }
-}
 
-// Storage extension for the additional fields. In the production
-// example these live alongside the other session state on the same
-// class.
-private var _evaluationCache = ExternalAnalysisCache<CalculatorLanguage, CalculatorValue>()
-private var _evaluationMetadata = SyntaxMetadataStore<CalculatorLanguage>()
-
-extension CalculatorSession {
-    var evaluationCache: ExternalAnalysisCache<CalculatorLanguage, CalculatorValue> {
-        _evaluationCache
-    }
-    var evaluationMetadata: SyntaxMetadataStore<CalculatorLanguage> {
-        get { _evaluationMetadata }
-        set { _evaluationMetadata = newValue }
+    func makeParseWitness(
+        previousTree: SharedSyntaxTree<CalculatorLanguage>?,
+        newTree: SharedSyntaxTree<CalculatorLanguage>
+    ) -> ParseWitness<CalculatorLanguage> {
+        return ParseWitness(
+            oldRoot: previousTree?.rootGreen,
+            newRoot: newTree.rootGreen,
+            reusedSubtrees: incremental.consumeAcceptedReuses()
+        )
     }
 }

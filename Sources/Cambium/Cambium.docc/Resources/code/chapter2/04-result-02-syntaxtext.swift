@@ -2,6 +2,11 @@
 
 import Cambium
 
+public struct CalculatorParseResult: Sendable {
+    public let tree: SharedSyntaxTree<CalculatorLanguage>
+    public let diagnostics: [Diagnostic<CalculatorLanguage>]
+}
+
 public extension CalculatorParseResult {
     func describeToken(at offset: TextSize) -> String {
         tree.withRoot { root in
