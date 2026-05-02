@@ -19,6 +19,11 @@ Cambium's full public surface against a real grammar. It ships as a
 library (`CalculatorCore`) plus an interactive REPL (`calc-repl`) so the
 same pieces can be unit-tested and poked at by hand.
 
+> Tip: For a step-by-step walkthrough that builds the calculator one
+> Cambium subsystem at a time, see <doc:tutorials/TableOfContents>. The
+> tutorials use the same source files documented here as their
+> canonical implementation.
+
 The grammar covers integer and real literals, parenthesized
 sub-expressions, unary minus, the `round(expr)` built-in, and the four
 arithmetic operators with normal precedence. The parser preserves input
@@ -109,4 +114,5 @@ one builds on the concepts established in <doc:GettingStarted>:
 ### Concepts demonstrated
 
 - <doc:GettingStarted>
+- <doc:tutorials/TableOfContents>
 - <doc:ExternalizedInterning>

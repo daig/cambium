@@ -1,0 +1,208 @@
+@Tutorial(time: 15) {
+    @Intro(title: "Define the Calculator Language") {
+        Every Cambium grammar starts with a kind enumeration: one case per
+        token and one per node the parser can produce. The kind enum
+        becomes the `Kind` associated type of a ``CambiumCore/SyntaxLanguage``
+        conformance, and Cambium specializes its generic types around that
+        language to make tree storage compact and traversal type-safe.
+
+        In this tutorial you build the calculator's `CalculatorKind` enum
+        with help from the ``CambiumSyntaxMacros/CambiumSyntaxKind()`` and
+        ``CambiumSyntaxMacros/StaticText(_:)`` macros, then add a
+        `CalculatorLanguage` conformance with the trivia and node/token
+        classifiers Cambium needs to traverse the tree correctly.
+    }
+
+    @Section(title: "Sketch the kind enum") {
+        @ContentAndMedia {
+            A `SyntaxKind`-conforming enum lives at the heart of every
+            Cambium language. The macro
+            ``CambiumSyntaxMacros/CambiumSyntaxKind()`` derives the
+            conformance so all you have to write is the cases.
+        }
+
+        @Steps {
+            @Step {
+                Create `CalculatorLanguage.swift` with an empty
+                `UInt32`-backed enum decorated with the
+                `@CambiumSyntaxKind` macro. The macro will generate the
+                `SyntaxKind` conformance from the cases you add next.
+
+                @Code(name: "CalculatorLanguage.swift", file: "01-language-01-empty.swift")
+            }
+
+            @Step {
+                Add the dynamic-text token kinds. Their text varies per
+                occurrence — a number literal can be `1` or `42`,
+                whitespace can be a single space or several lines — so the
+                parser will pass an explicit text string to the builder
+                whenever it emits one of these.
+
+                Each case needs an explicit `UInt32` raw value; gaps
+                between dynamic, static, and node ranges keep schema
+                evolution easy to spot.
+
+                @Code(name: "CalculatorLanguage.swift", file: "01-language-02-dynamic-tokens.swift")
+            }
+
+            @Step {
+                Add the static-text token kinds — operators, parentheses,
+                and the `round` keyword — annotated with
+                `@StaticText(...)`. The macro folds the literal into a
+                `staticText(for:)` lookup, so the parser will emit these
+                kinds without restating the text at the call site.
+
+                Static-text tokens are deduplicated globally inside the
+                builder's interner: two `+` tokens share one byte buffer.
+
+                @Code(name: "CalculatorLanguage.swift", file: "01-language-03-static-text.swift")
+            }
+
+            @Step {
+                Add the node kinds. A node is an internal grouping of
+                tokens and child nodes; the parser declares one whenever
+                it descends into a syntactic category. `root` is
+                mandatory and wraps the whole document. `missing` and
+                `error` are sentinels the parser will use when input is
+                incomplete or unexpected — keeping these in the kind
+                enum (rather than out-of-tree state) is what lets a
+                Cambium tree round-trip malformed source.
+
+                @Code(name: "CalculatorLanguage.swift", file: "01-language-04-nodes.swift")
+            }
+        }
+    }
+
+    @Section(title: "Conform to SyntaxLanguage") {
+        @ContentAndMedia {
+            ``CambiumCore/SyntaxLanguage`` is the contract Cambium's
+            generic types are parameterized by. It binds a kind enum to
+            the runtime distinguished kinds (`rootKind`, `missingKind`,
+            `errorKind`), a serialization identity, and the predicates
+            Cambium uses to classify trivia, nodes, and tokens during
+            traversal.
+        }
+
+        @Steps {
+            @Step {
+                Add a `CalculatorLanguage` enum that conforms to
+                `SyntaxLanguage`. Most of the protocol's requirements
+                have default implementations, so the conformance reduces
+                to: nominate the distinguished kinds, declare a
+                serialization identity, and (in the next step) provide
+                kind classifiers.
+
+                The `serializationID` and `serializationVersion` are
+                stable identifiers persisted with green snapshots — keep
+                them out of test code so refactors do not silently
+                invalidate saved trees.
+
+                @Code(name: "CalculatorLanguage.swift", file: "01-language-05-conformance-basics.swift")
+            }
+
+            @Step {
+                Add the kind classifiers. ``CambiumCore/SyntaxLanguage/isTrivia(_:)``
+                marks trivia tokens (whitespace, comments) so traversal
+                APIs can skip them. ``CambiumCore/SyntaxLanguage/isNode(_:)``
+                and ``CambiumCore/SyntaxLanguage/isToken(_:)`` partition
+                every kind into "internal grouping" or "leaf with text."
+                The default classifiers treat any kind with static text as
+                a token, which would misclassify `number` and `realNumber`
+                — both *dynamic*-text tokens — so we override both.
+
+                @Code(name: "CalculatorLanguage.swift", file: "01-language-06-classifiers.swift")
+            }
+
+            @Step {
+                Finally, add a small grammar-specific extension. The
+                parser will use `binaryPrecedence` for Pratt-style
+                operator climbing; the typed AST will use
+                `isExpressionNode` to filter expression-shaped children
+                from the root.
+
+                These extensions live next to the kind enum because they
+                interpret the grammar, not because they are part of the
+                Cambium contract.
+
+                @Code(name: "CalculatorLanguage.swift", file: "01-language-07-helpers.swift")
+            }
+        }
+    }
+
+    @Assessments {
+        @MultipleChoice {
+            Why does `CalculatorLanguage` override `isToken(_:)` and
+            `isNode(_:)` rather than relying on the default classifiers?
+
+            @Choice(isCorrect: false) {
+                The default classifiers crash on enums that have a
+                `root` case.
+
+                @Justification(reaction: "Try again") {
+                    Cambium's defaults handle the `root` case fine. The
+                    issue lies elsewhere.
+                }
+            }
+
+            @Choice(isCorrect: true) {
+                The default classifier treats kinds without static text
+                as nodes, which would misclassify the dynamic-text
+                `number` and `realNumber` tokens.
+
+                @Justification(reaction: "That's right") {
+                    The default `isToken` returns `true` only for kinds
+                    with static text, so dynamic-text leaves get
+                    misclassified as nodes. We override both predicates
+                    to be explicit.
+                }
+            }
+
+            @Choice(isCorrect: false) {
+                Cambium requires both classifiers to be defined manually
+                for every grammar.
+
+                @Justification(reaction: "Try again") {
+                    Both predicates have default implementations on
+                    ``CambiumCore/SyntaxLanguage``. A grammar with only
+                    static-text tokens can rely on the defaults.
+                }
+            }
+        }
+
+        @MultipleChoice {
+            What does `@StaticText("+")` change about the kind it
+            annotates?
+
+            @Choice(isCorrect: false) {
+                It tells the parser to skip the kind entirely.
+
+                @Justification(reaction: "Try again") {
+                    `@StaticText` is purely declarative — the parser
+                    still emits these tokens.
+                }
+            }
+
+            @Choice(isCorrect: true) {
+                It folds the literal into the macro-generated
+                `staticText(for:)`, letting the parser call
+                `staticToken(.plus)` instead of `token(.plus, text: "+")`.
+
+                @Justification(reaction: "That's right") {
+                    The text comes from the language definition, so the
+                    parser does not have to repeat it. Mismatched
+                    `token`/`staticToken` calls are caught at the call
+                    site by the builder.
+                }
+            }
+
+            @Choice(isCorrect: false) {
+                It promotes the kind to a node kind.
+
+                @Justification(reaction: "Try again") {
+                    `@StaticText` only attaches the literal text — the
+                    kind remains a token kind.
+                }
+            }
+        }
+    }
+}

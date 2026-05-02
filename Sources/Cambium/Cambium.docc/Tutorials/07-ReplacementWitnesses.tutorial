@@ -1,0 +1,234 @@
+@Tutorial(time: 25) {
+    @Intro(title: "Replace Subtrees with Witnesses") {
+        Cambium trees are persistent: there is no in-place mutation.
+        `SharedSyntaxTree.replacing(_:with:context:)` produces a *new*
+        tree that shares as much green storage with
+        the old as possible, and returns a
+        ``CambiumCore/ReplacementWitness`` describing the structural
+        change.
+
+        In this tutorial you build a constant-folding pass on top of
+        `replacing`. Each iteration finds one foldable expression,
+        evaluates it, builds a literal subtree, splices it in, and
+        records the witness. Tutorial 9 shows how analysis caches use
+        those witnesses to translate per-node values across edits
+        without re-evaluating untouched subtrees.
+    }
+
+    @Section(title: "Structural types") {
+        @ContentAndMedia {
+            A fold pass produces a sequence of `FoldStep` records —
+            one per replacement — each carrying the witness that
+            described the change. The witness is `Sendable` and
+            `Copyable`, so consumers can hold it past the borrow
+            scope and inspect it later.
+        }
+
+        @Steps {
+            @Step {
+                Define `FoldStep`, `FoldReport`, and the internal
+                `FoldCandidate` / `FoldLiteral` value types.
+                `FoldStep.witness` and `FoldStep.newTree` are the
+                Cambium-typed fields; everything else is fold-specific
+                bookkeeping.
+
+                @Code(name: "CalculatorFold.swift", file: "07-fold-01-types.swift")
+            }
+        }
+    }
+
+    @Section(title: "Find a foldable expression in post-order") {
+        @ContentAndMedia {
+            The fold engine walks the tree in *post-order*: children
+            visited before their parents. ``CambiumCore/SyntaxNodeCursor/walkPreorder(_:)``
+            emits both `.enter` and `.leave` events; acting on
+            `.leave` gives us post-order traversal without an extra
+            stack.
+
+            A node is foldable when every direct operand is already a
+            literal — at that point we can evaluate it with the
+            evaluator from Tutorial 6.
+        }
+
+        @Steps {
+            @Step {
+                Add `firstFoldCandidate(in:)`. It walks the tree on
+                `.leave` events, asks `evaluatedValue(for:)` whether
+                the node's operands are literals, and snapshots the
+                first candidate. The walk is borrowed; the candidate
+                materializes an owned `SyntaxNodeHandle`,
+                `SyntaxNodePath`, and source text once it has decided
+                to commit.
+
+                @Code(name: "CalculatorFold.swift", file: "07-fold-02-candidate.swift")
+            }
+        }
+    }
+
+    @Section(title: "Build a replacement and splice it in") {
+        @ContentAndMedia {
+            `SharedSyntaxTree.replacing(_:with:context:)` takes an
+            owned handle for the node to replace, a
+            ``CambiumCore/ResolvedGreenNode`` (a green subtree paired
+            with its resolver), and a ``CambiumBuilder/GreenTreeContext``
+            whose interner shares the target tree's namespace.
+
+            Reusing the source tree's context is what lets the splice
+            take ``CambiumBuilder/SubtreeReuseOutcome/direct`` rather
+            than re-interning every dynamic token. The replacement's
+            green storage is shared into the new tree, while the rest
+            of the old tree is structurally shared too — only the
+            ancestors of the replaced node get rebuilt.
+        }
+
+        @Steps {
+            @Step {
+                Add `applyFold`. The pattern is: build the replacement
+                with a fresh ``CambiumBuilder/GreenTreeBuilder`` bound
+                to the supplied context, finish it into a
+                ``CambiumCore/ResolvedGreenNode``, then call
+                `tree.replacing(...)` and capture the witness.
+
+                The function is `consuming` over the context and hands
+                the next context back inside `FoldApplyOutput` —
+                Swift tuples cannot yet hold `~Copyable` values, so a
+                small carrier struct fills in.
+
+                @Code(name: "CalculatorFold.swift", file: "07-fold-03-replace.swift")
+            }
+        }
+    }
+
+    @Section(title: "Iterate to a fixed point") {
+        @ContentAndMedia {
+            One fold pass replaces one expression. A real fold drives
+            the pass in a loop until no candidate remains; each
+            iteration's output context becomes the next iteration's
+            input, so green-node cache hits and namespace identity
+            carry across.
+        }
+
+        @Steps {
+            @Step {
+                Add the public `foldCalculatorTree` driver. The loop
+                threads the evolving tree and the
+                ``CambiumBuilder/GreenTreeContext`` through every
+                iteration. By the time the loop exits, `steps`
+                contains one entry per replacement and the final
+                tree is fully folded.
+
+                @Code(name: "CalculatorFold.swift", file: "07-fold-04-loop.swift")
+            }
+        }
+    }
+
+    @Section(title: "Inspect the witness") {
+        @ContentAndMedia {
+            The point of the witness is to translate references
+            across the change. ``CambiumCore/ReplacementWitness/classify(path:)``
+            takes a path that addressed a node in the *old* tree and
+            returns a ``CambiumCore/ReplacementOutcome`` saying what
+            happened to that node.
+        }
+
+        @Steps {
+            @Step {
+                Walk through the four `ReplacementOutcome` cases for a
+                couple of paths from each fold step. For paths
+                outside the replaced region you get `.unchanged`; for
+                the replaced node itself you get `.replacedRoot` with
+                the new green subtree.
+
+                Tutorial 9 puts this to use: the analysis cache
+                translates a node's old `SyntaxNodeIdentity` through
+                `classify(path:)` so that every entry whose path
+                still resolves to a corresponding new-tree node keeps
+                its cached value.
+
+                @Code(name: "WitnessDemo.swift", file: "07-witness-inspect.swift")
+            }
+        }
+    }
+
+    @Assessments {
+        @MultipleChoice {
+            Why must `applyFold` build the replacement subtree using a
+            ``CambiumBuilder/GreenTreeContext`` that shares the target
+            tree's namespace?
+
+            @Choice(isCorrect: false) {
+                Otherwise the splice would crash at runtime.
+
+                @Justification(reaction: "Try again") {
+                    The splice still succeeds — Cambium handles
+                    cross-namespace splices by remapping. The reason
+                    is performance, not correctness.
+                }
+            }
+
+            @Choice(isCorrect: true) {
+                A cross-namespace splice falls into the
+                ``CambiumBuilder/SubtreeReuseOutcome/remapped`` path,
+                which re-interns every dynamic token. Same-namespace
+                splices take ``CambiumBuilder/SubtreeReuseOutcome/direct``
+                — green-node identity is preserved.
+
+                @Justification(reaction: "That's right") {
+                    Sharing the context is what lets the fold
+                    iteratively reuse green storage across passes
+                    instead of rebuilding from scratch.
+                }
+            }
+
+            @Choice(isCorrect: false) {
+                Cambium requires a single global context per process.
+
+                @Justification(reaction: "Try again") {
+                    Many contexts can coexist. Each carries its own
+                    namespace; the constraint is that splices benefit
+                    from matching namespaces.
+                }
+            }
+        }
+
+        @MultipleChoice {
+            What does `ReplacementOutcome.unchanged` guarantee about
+            the path's node in the new tree?
+
+            @Choice(isCorrect: false) {
+                The node has the same `SyntaxNodeIdentity` as in the
+                old tree.
+
+                @Justification(reaction: "Try again") {
+                    `SyntaxNodeIdentity` is per-tree. The new tree
+                    has a fresh `TreeID`, so identities differ even
+                    when the node is structurally unchanged.
+                }
+            }
+
+            @Choice(isCorrect: true) {
+                The node is structurally preserved — the same path
+                resolves to a node with the same green storage as in
+                the old tree.
+
+                @Justification(reaction: "That's right") {
+                    Persistent storage is the mechanism: the
+                    unreplaced subtrees share green nodes between old
+                    and new. Identity tracking that wants to follow
+                    nodes across the edit walks the path again on the
+                    new tree.
+                }
+            }
+
+            @Choice(isCorrect: false) {
+                The node is in the same byte range as before.
+
+                @Justification(reaction: "Try again") {
+                    Replacing a subtree changes byte offsets for
+                    everything to its right. `.unchanged` is about
+                    structural preservation, not byte coordinates.
+                }
+            }
+        }
+    }
+}

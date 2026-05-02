@@ -1,0 +1,170 @@
+@Tutorial(time: 15) {
+    @Intro(title: "Save and Load Trees") {
+        Cambium can serialize a tree to a compact byte stream and
+        decode it back. The format is length-, hash-, and
+        kind-validated at every record, so flipped bytes produce
+        named errors at decode time rather than silently malformed
+        trees.
+
+        Editor warm-restart is the canonical use case: persist the
+        last-good tree to disk on shutdown, decode it on launch, and
+        adopt it as the session's current tree without re-parsing
+        the source. The same mechanism backs `:save` and `:load` in
+        the calculator REPL.
+    }
+
+    @Section(title: "Encode a tree") {
+        @ContentAndMedia {
+            ``CambiumCore/SharedSyntaxTree/serializeGreenSnapshot()``
+            returns a `[UInt8]` payload representing the tree's green
+            structure plus the dynamic-token text vocabulary it
+            references. The encoding is keyed by your language's
+            ``CambiumCore/SyntaxLanguage/serializationID`` and
+            ``CambiumCore/SyntaxLanguage/serializationVersion`` —
+            the constants you set on `CalculatorLanguage` in
+            Tutorial 1.
+        }
+
+        @Steps {
+            @Step {
+                Add `saveCalculatorTree(_:to:)`. The tree is
+                serialized to bytes and written to `url` as `Data`.
+                The format is canonical: same tree, same input,
+                same byte sequence.
+
+                @Code(name: "SaveAndLoad.swift", file: "12-serial-01-save.swift")
+            }
+        }
+    }
+
+    @Section(title: "Decode a snapshot") {
+        @ContentAndMedia {
+            ``CambiumSerialization/GreenSnapshotDecoder/decodeTree(_:as:)``
+            takes a byte payload and returns a `~Copyable`
+            ``CambiumCore/SyntaxTree``. Promote it to
+            ``CambiumCore/SharedSyntaxTree`` with `intoShared()` to
+            store or share across actors.
+
+            The decoded tree's ``CambiumCore/TokenResolver`` carries
+            its own token-key namespace, disjoint from any prior
+            session context. A long-lived session that adopts the
+            decoded tree must drop any cached
+            ``CambiumBuilder/GreenTreeContext`` so the next parse
+            mints a fresh one bound to the new namespace.
+        }
+
+        @Steps {
+            @Step {
+                Add `loadCalculatorTree(from:)` and document the
+                session-side adoption pattern. `adopt(_:)`'s job is
+                to reset every piece of state whose validity depends
+                on the prior tree's identity — the cached context,
+                the analysis cache, the metadata store.
+
+                @Code(name: "SaveAndLoad.swift", file: "12-serial-02-load.swift")
+            }
+        }
+    }
+
+    @Section(title: "Verify the round-trip") {
+        @ContentAndMedia {
+            Two trees built from the same input — one fresh, one
+            decoded — are observationally equivalent for traversal
+            and evaluation: same source bytes, same kinds, same
+            structure. Validation errors are surfaced through
+            ``CambiumSerialization/CambiumSerializationError`` so a
+            flipped byte produces a named failure rather than a
+            silently malformed tree.
+        }
+
+        @Steps {
+            @Step {
+                Round-trip a tree through serialization and check
+                that source text is preserved bit-for-bit. Then
+                deliberately corrupt a snapshot byte and confirm the
+                decoder catches it through a structured error — the
+                guarantee that lets editors trust persisted state
+                across launches.
+
+                @Code(name: "RoundtripDemo.swift", file: "12-serial-03-roundtrip.swift")
+            }
+        }
+    }
+
+    @Assessments {
+        @MultipleChoice {
+            Why does `CalculatorSession.adopt(_:)` need to clear the
+            session's analysis cache?
+
+            @Choice(isCorrect: false) {
+                The cache uses memory that the decoded tree needs.
+
+                @Justification(reaction: "Try again") {
+                    The cache is bounded; size is not the issue.
+                    The reason is structural.
+                }
+            }
+
+            @Choice(isCorrect: true) {
+                Cache entries are keyed by
+                ``CambiumCore/SyntaxNodeIdentity``. Identities are
+                per-tree, so prior entries cannot resolve in the
+                newly-loaded tree.
+
+                @Justification(reaction: "That's right") {
+                    Adoption is a hard discontinuity for identity.
+                    Re-evaluating on demand against the new tree is
+                    the only correct path; carrying old entries
+                    would leak invalid keys.
+                }
+            }
+
+            @Choice(isCorrect: false) {
+                ``CambiumAnalysis/ExternalAnalysisCache`` panics on
+                cross-tree access.
+
+                @Justification(reaction: "Try again") {
+                    The cache silently misses on cross-tree keys —
+                    not a panic, but also not useful. Clearing is
+                    the explicit correctness measure.
+                }
+            }
+        }
+
+        @MultipleChoice {
+            What does the decoder validate at decode time?
+
+            @Choice(isCorrect: false) {
+                Only the file's leading magic-number bytes.
+
+                @Justification(reaction: "Try again") {
+                    Magic-number-only validation would let a
+                    corrupted middle section produce a malformed
+                    tree silently.
+                }
+            }
+
+            @Choice(isCorrect: true) {
+                Length headers, per-record kinds, and a structural
+                hash — every record is checked, so any bit flip
+                surfaces as a structured error.
+
+                @Justification(reaction: "That's right") {
+                    Strict validation is what makes persisted
+                    snapshots safe to trust across launches and to
+                    move between machines.
+                }
+            }
+
+            @Choice(isCorrect: false) {
+                The serialization version, but not the contents.
+
+                @Justification(reaction: "Try again") {
+                    Version checking is one of several layers — the
+                    decoder also validates per-record content
+                    integrity.
+                }
+            }
+        }
+    }
+}

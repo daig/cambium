@@ -1,0 +1,237 @@
+@Tutorial(time: 30) {
+    @Intro(title: "Add Precedence and Error Recovery") {
+        The parser from the previous tutorial handles only "atomic"
+        prefix forms — literals and parenthesized groups. To parse
+        `1 + 2 * 3` correctly the parser needs operator precedence; to
+        survive `1 +` or `(2` it needs error recovery.
+
+        Cambium provides two structural primitives for both jobs:
+        ``CambiumBuilder/BuilderCheckpoint`` plus
+        ``CambiumBuilder/GreenTreeBuilder/startNode(at:_:)`` for
+        retroactively wrapping already-emitted children, and
+        ``CambiumBuilder/GreenTreeBuilder/missingNode(_:)`` /
+        ``CambiumBuilder/GreenTreeBuilder/missingToken(_:)`` for
+        synthesizing structural placeholders so the tree round-trips
+        even malformed input.
+    }
+
+    @Section(title: "Pratt precedence with checkpoints") {
+        @ContentAndMedia {
+            With a recursive-descent parser and an event-shaped builder
+            (where every `startNode` must precede the children it
+            contains), left-recursive productions are awkward: when the
+            parser sees `1`, it doesn't yet know whether more
+            operations follow, so it can't open a `binaryExpr` first.
+
+            ``CambiumBuilder/GreenTreeBuilder/checkpoint()`` solves
+            this. A checkpoint records the current builder position;
+            ``CambiumBuilder/GreenTreeBuilder/startNode(at:_:)`` later
+            opens a node *retroactively*, gathering every child
+            appended since the checkpoint into the new frame. That is
+            exactly what Pratt-style precedence climbing needs.
+        }
+
+        @Steps {
+            @Step {
+                Begin with the parser as it stood at the end of
+                Tutorial 2: prefix-only, no operators, no recovery.
+
+                @Code(name: "CalculatorParser.swift", file: "03-parser-01-base.swift")
+            }
+
+            @Step {
+                Replace the bare `parsePrefix()` call with
+                `parseExpression(minPrecedence:)`. Take a checkpoint
+                *before* the prefix, parse the prefix, then loop: while
+                the next operator's precedence meets `minPrecedence`,
+                open a `binaryExpr` retroactively at the checkpoint and
+                recurse for the right operand at one higher precedence.
+
+                The "recurse at one higher precedence" trick is what
+                makes binary operators left-associative.
+
+                @Code(name: "CalculatorParser.swift", file: "03-parser-02-checkpoint.swift")
+            }
+        }
+    }
+
+    @Section(title: "Unary and prefix-call expressions") {
+        @ContentAndMedia {
+            Unary minus and `round(...)` are prefix forms: they can
+            appear anywhere a prefix expression is expected, but they
+            structure their operands differently. Unary operators bind
+            tighter than any binary; `round(...)` opens a fresh
+            sub-expression inside its parens.
+        }
+
+        @Steps {
+            @Step {
+                Add unary minus and `round(expr)`. Unary minus opens
+                a `unaryExpr`, then recurses into `parseExpression`
+                with `prefixPrecedence` so subsequent binary operators
+                bind *outside* the unary, not inside. The `round`
+                handler opens a `roundCallExpr`, emits the keyword and
+                opening paren, recurses for the argument, and closes.
+
+                @Code(name: "CalculatorParser.swift", file: "03-parser-03-unary-and-round.swift")
+            }
+        }
+    }
+
+    @Section(title: "Recover from missing tokens") {
+        @ContentAndMedia {
+            A production parser has to keep going past mistakes — an
+            IDE running this parser on every keystroke will see
+            half-typed input the whole time. Cambium's recovery
+            primitive is ``CambiumBuilder/GreenTreeBuilder/missingToken(_:)``:
+            it emits a zero-length structural placeholder that fills the
+            slot a `staticToken` would have taken, so the surrounding
+            node still has the children its kind expects.
+
+            To report what went wrong, the parser collects
+            ``CambiumAnalysis/Diagnostic`` records alongside the tree.
+            Cambium does not bake diagnostics into the tree itself;
+            they are an out-of-tree array the caller can render however
+            it likes.
+        }
+
+        @Steps {
+            @Step {
+                Track diagnostics on the parser, return them from
+                `finish()` inside a small `CalculatorParseResult`
+                struct, and recover from a missing `)`. When the parser
+                expects `rightParen` but sees something else, it emits
+                a `missingToken(.rightParen)` so the `groupExpr` keeps
+                its closing slot, then logs a diagnostic.
+
+                The same shape applies to `round(`'s opening paren and
+                its closing paren — the `parseRoundCall()` helper now
+                wraps both with the same recovery pattern.
+
+                @Code(name: "CalculatorParser.swift", file: "03-parser-04-missing-paren.swift")
+            }
+        }
+    }
+
+    @Section(title: "Recover from missing expressions and stray tokens") {
+        @ContentAndMedia {
+            ``CambiumBuilder/GreenTreeBuilder/missingNode(_:)`` is the
+            structural counterpart to `missingToken`: it emits a
+            zero-length `missing` node where an expression was
+            required. Pair that with an `error` node — a real wrapper
+            around the offending token — and the parser can survive
+            any malformed input without compromising tree structure.
+        }
+
+        @Steps {
+            @Step {
+                Handle "expression expected here" in two places: at
+                the start of an empty document (the root's only child
+                must be *something*), and inside `parsePrefix()`'s
+                default case (after a binary operator with no
+                following operand, the RHS slot must still exist). In
+                both cases emit `missingNode(.missing)` and a
+                diagnostic.
+
+                @Code(name: "CalculatorParser.swift", file: "03-parser-05-missing-expr.swift")
+            }
+
+            @Step {
+                Wrap unexpected tokens — both lexer-level garbage
+                (`.invalid`) and stray significant tokens after a
+                complete expression — in a structural `error` node.
+                The wrapping uses the same checkpoint pattern as the
+                binary-expression code, with `startNode(at:_:)`
+                retroactively reparenting the offending token.
+
+                With the parser now keeping going past any failure,
+                `parseCalculator(_:)` always returns a tree plus a
+                possibly-empty list of diagnostics — even for input
+                like `(1 +` or `@@@`.
+
+                @Code(name: "CalculatorParser.swift", file: "03-parser-06-error-wrap.swift")
+            }
+        }
+    }
+
+    @Assessments {
+        @MultipleChoice {
+            Why does `parseExpression(minPrecedence:)` take the
+            checkpoint *before* parsing the prefix instead of after?
+
+            @Choice(isCorrect: false) {
+                Because `checkpoint()` is faster on an empty frame.
+
+                @Justification(reaction: "Try again") {
+                    Checkpoints are O(1) regardless of the frame's
+                    contents.
+                }
+            }
+
+            @Choice(isCorrect: true) {
+                Because the prefix becomes the LHS of a `binaryExpr`
+                if an operator follows. The retroactive wrap needs to
+                include the prefix's nodes, so the checkpoint must
+                predate them.
+
+                @Justification(reaction: "That's right") {
+                    `startNode(at:_:)` reparents every child appended
+                    since the checkpoint, so the LHS must already be
+                    inside that span when the wrap fires.
+                }
+            }
+
+            @Choice(isCorrect: false) {
+                Because Cambium requires every `startNode(at:_:)` to
+                pair with a `checkpoint()` taken at the same source
+                offset.
+
+                @Justification(reaction: "Try again") {
+                    Checkpoints are not tied to source offsets — they
+                    are positions in the builder's child stream.
+                }
+            }
+        }
+
+        @MultipleChoice {
+            What guarantees that recovery via
+            `missingToken(.rightParen)` keeps the tree well-formed for
+            downstream consumers?
+
+            @Choice(isCorrect: false) {
+                Cambium silently inserts a synthetic `)` byte into the
+                source text.
+
+                @Justification(reaction: "Try again") {
+                    Cambium never modifies source text. `missingToken`
+                    is a *structural* placeholder; it carries zero
+                    bytes.
+                }
+            }
+
+            @Choice(isCorrect: true) {
+                The missing token fills the structural slot the
+                surrounding node expects, and renders to zero bytes.
+                Traversal sees the `groupExpr` with its closing
+                child; round-tripped text omits it.
+
+                @Justification(reaction: "That's right") {
+                    Cambium distinguishes structural shape (well-formed
+                    by construction) from rendered text (lossless by
+                    construction). Missing tokens contribute to the
+                    former without affecting the latter.
+                }
+            }
+
+            @Choice(isCorrect: false) {
+                The parser caller is required to call a "fixup" pass
+                after each `missingToken` call.
+
+                @Justification(reaction: "Try again") {
+                    No fixup is needed — `missingToken` and
+                    `missingNode` are first-class builder operations.
+                }
+            }
+        }
+    }
+}

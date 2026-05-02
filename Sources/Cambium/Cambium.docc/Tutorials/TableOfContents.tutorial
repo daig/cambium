@@ -1,0 +1,100 @@
+@Tutorials(name: "Cambium") {
+    @Intro(title: "Build a Calculator with Cambium") {
+        Cambium is a Swift-native concrete syntax tree library. This
+        tutorial series walks you through building a small but
+        production-shaped calculator language end-to-end: a recursive-
+        descent parser that produces a lossless tree, a typed AST overlay,
+        an evaluator with memoized analysis, persistent edits with
+        identity-preserving witnesses, an incremental reparse loop, fork-
+        join evaluation across structured-concurrent tasks, parallel
+        parsing with externalized interning, and on-disk serialization.
+
+        Each chapter culminates in REPL commands you can try in the
+        companion sample at `Examples/Calculator`. By the end you will
+        have built the same library that backs the `calc-repl`
+        executable, one Cambium subsystem at a time.
+    }
+
+    @Chapter(name: "Build a Lossless CST") {
+        Cambium represents a parsed document as a homogeneous green tree
+        whose nodes are tagged with a kind. In this chapter you define the
+        calculator's grammar, drive a builder from a recursive-descent
+        parser, and add Pratt-style precedence and parser-level error
+        recovery so the resulting tree round-trips even malformed input.
+
+        @Image(source: chapter-banner.png, alt: "Chapter banner")
+
+        @TutorialReference(tutorial: "doc:01-DefineLanguage")
+        @TutorialReference(tutorial: "doc:02-DriveBuilder")
+        @TutorialReference(tutorial: "doc:03-PrecedenceAndRecovery")
+    }
+
+    @Chapter(name: "Read and Model the Tree") {
+        Once a tree exists, consumers need to walk it, query it by byte
+        position, and project a typed view for kind-specific work. This
+        chapter introduces borrowed cursors, owned handles, byte-streaming
+        text reads, and a typed AST overlay generated from the
+        ``CambiumSyntaxMacros/CambiumSyntaxNode(_:for:)`` macro, then uses
+        them to build a recursive evaluator.
+
+        @Image(source: chapter-banner.png, alt: "Chapter banner")
+
+        @TutorialReference(tutorial: "doc:04-ReadingTree")
+        @TutorialReference(tutorial: "doc:05-TypedAST")
+        @TutorialReference(tutorial: "doc:06-Evaluator")
+    }
+
+    @Chapter(name: "Edit, Reparse, and Memoize") {
+        Cambium's trees are persistent: editing produces a new tree
+        sharing as much green storage as possible, with a witness
+        describing the structural change. This chapter wires up constant
+        folding via subtree replacement, an incremental reparse loop with
+        a reuse oracle, and memoized analysis caches whose entries
+        survive edits by translating through the witnesses.
+
+        @Image(source: chapter-banner.png, alt: "Chapter banner")
+
+        @TutorialReference(tutorial: "doc:07-ReplacementWitnesses")
+        @TutorialReference(tutorial: "doc:08-IncrementalReparse")
+        @TutorialReference(tutorial: "doc:09-AnalysisTranslation")
+    }
+
+    @Chapter(name: "Concurrency and Persistence") {
+        Cambium's trees promote into ``CambiumCore/SharedSyntaxTree``
+        snapshots that are `Sendable` and safe to share across tasks. In
+        this chapter you write a structured-concurrent fork-join
+        evaluator, parse a workload of expressions in parallel through a
+        shared token interner, and serialize a tree to disk for
+        editor-style warm restarts.
+
+        @Image(source: chapter-banner.png, alt: "Chapter banner")
+
+        @TutorialReference(tutorial: "doc:10-ForkJoinEval")
+        @TutorialReference(tutorial: "doc:11-ParallelParse")
+        @TutorialReference(tutorial: "doc:12-Serialization")
+    }
+
+    @Resources {
+        Reference material that complements the hands-on tutorials.
+
+        @Documentation(destination: "https://λ.dog/cambium/documentation/cambium/") {
+            Articles in the Cambium documentation that complement the
+            hands-on path:
+
+            - "Getting Started" — narrative skim of the API.
+            - "Calculator" — sample-code overview.
+            - "Externalized Interning" — deep dive on `TokenInterner`.
+        }
+
+        @SampleCode(destination: "https://github.com/daig/cambium/tree/main/Examples/Calculator") {
+            The calculator example is a standalone SwiftPM package at
+            `Examples/Calculator`. Each tutorial cites the file in that
+            example whose canonical implementation it builds toward —
+            read them side by side once you have finished the
+            corresponding tutorial.
+
+            - [`Examples/Calculator`](https://github.com/daig/cambium/tree/main/Examples/Calculator) — the full sample.
+            - [`README.md`](https://github.com/daig/cambium/blob/main/Examples/Calculator/README.md) — REPL command reference.
+        }
+    }
+}

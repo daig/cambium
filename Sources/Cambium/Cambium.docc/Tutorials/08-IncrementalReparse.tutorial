@@ -1,0 +1,215 @@
+@Tutorial(time: 30) {
+    @Intro(title: "Incrementally Reparse") {
+        An IDE re-runs the parser on every keystroke. Reparsing the
+        whole document each time is wasteful when most subtrees did
+        not change. ``CambiumIncremental`` exposes the four pieces
+        you wire together for *subtree-level* reuse:
+        ``CambiumIncremental/IncrementalParseSession`` (long-lived
+        bookkeeping), ``CambiumIncremental/ReuseOracle`` (the
+        parser-facing query API), ``CambiumIncremental/TextEdit``
+        (the change description), and
+        ``CambiumIncremental/ParseWitness`` (the post-parse summary
+        of what was reused).
+
+        In this tutorial you extend the parser from Chapter 1 to
+        consult the oracle on every prefix, splice unchanged subtrees
+        from the previous tree, and let the surrounding session build
+        a witness summarizing the reparse.
+    }
+
+    @Section(title: "Extend the parser inputs") {
+        @ContentAndMedia {
+            The parser needs to know about the previous tree, the
+            edits that produced the current source, and the long-lived
+            session. Extending the initializer is most of the
+            structural change — the parsing logic stays the same
+            apart from one new branch in `parsePrefix`.
+        }
+
+        @Steps {
+            @Step {
+                Add `previousTree`, `edits`, and a reference to the
+                surrounding `IncrementalParseSession` to the parser.
+                Also catalog the reusable kinds — note that
+                `binaryExpr` is deliberately excluded: its precedence
+                context lives in the *caller's* `minPrecedence`, not
+                in the subtree, so splicing one in could silently
+                change associativity.
+
+                @Code(name: "CalculatorParser.swift", file: "08-parser-01-incremental-init.swift")
+            }
+        }
+    }
+
+    @Section(title: "Ask the oracle for a reusable subtree") {
+        @ContentAndMedia {
+            ``CambiumIncremental/ReuseOracle/withReusableNode(startingAt:kind:_:)``
+            asks the previous tree: "do you have a node of `kind`
+            starting at byte offset `oldOffset` whose region is not
+            invalidated by the recorded edits?" If so, it hands a
+            borrowed cursor on that node to your closure. Inside the
+            closure you decide whether to splice and call
+            ``CambiumBuilder/GreenTreeBuilder/reuseSubtree(_:)``.
+
+            The parser walks NEW-source coordinates; the oracle walks
+            OLD-tree coordinates. A small `mapNewOffsetToOld` helper
+            replays the edits to translate.
+        }
+
+        @Steps {
+            @Step {
+                Add `tryReusePrefix(at:)` and its inner
+                `attemptReuse`. The reuse outcome from
+                ``CambiumBuilder/GreenTreeBuilder/reuseSubtree(_:)``
+                is either ``CambiumBuilder/SubtreeReuseOutcome/direct``
+                — when the previous-tree cursor's namespace matches
+                the builder's — or
+                ``CambiumBuilder/SubtreeReuseOutcome/remapped`` when
+                Cambium had to re-intern dynamic tokens. Sharing the
+                ``CambiumBuilder/GreenTreeContext`` across reparses is
+                what keeps the splice on the `.direct` path; we set
+                that up in the next section.
+
+                @Code(name: "CalculatorParser.swift", file: "08-parser-02-try-reuse.swift")
+            }
+
+            @Step {
+                Update `parsePrefix()` to call `tryReusePrefix`
+                first. If reuse succeeds, the lexer has already
+                advanced past the spliced bytes and the parser
+                returns; otherwise it falls through to the
+                from-scratch path you wrote in Chapter 1.
+
+                @Code(name: "CalculatorParser.swift", file: "08-parser-03-call-reuse.swift")
+            }
+        }
+    }
+
+    @Section(title: "Wrap the parser in a session") {
+        @ContentAndMedia {
+            ``CambiumIncremental/IncrementalParseSession`` is the
+            long-lived state container: it aggregates
+            ``CambiumIncremental/IncrementalParseCounters`` across
+            reparses and accumulates accepted-reuse records that
+            ultimately populate a ``CambiumIncremental/ParseWitness``.
+
+            The surrounding `CalculatorSession` also forwards the
+            ``CambiumBuilder/GreenTreeContext`` from one parse to the
+            next via ``CambiumBuilder/GreenBuildResult/intoContext()``.
+            That forwarding is what keeps splices on the `.direct`
+            path — same interner, same namespace, same `TokenKey`s.
+        }
+
+        @Steps {
+            @Step {
+                Add `CalculatorSession` with a `parse(_:edits:)`
+                method that builds the parser inputs from the
+                session's state and forwards the resulting context
+                back into the session afterward. The convenience
+                ``CambiumBuilder/GreenCachePolicy/parseSession(maxEntries:)``
+                policy is sized for editor sessions where the cache
+                outlives many reparses.
+
+                @Code(name: "CalculatorSession.swift", file: "08-session-01-shape.swift")
+            }
+
+            @Step {
+                Build a ``CambiumIncremental/ParseWitness`` from the
+                session's accepted-reuse log. Each spliced subtree
+                produces one ``CambiumIncremental/Reuse`` triple of
+                `(oldPath, newPath, green)` — exactly the data
+                consumers need to translate references that were
+                anchored to v0 nodes onto their v1 counterparts.
+
+                Tutorial 9 uses these triples to translate analysis
+                cache entries.
+
+                @Code(name: "CalculatorSession.swift", file: "08-session-02-witness.swift")
+            }
+        }
+    }
+
+    @Assessments {
+        @MultipleChoice {
+            Why is `binaryExpr` deliberately excluded from the
+            calculator's reusable kinds?
+
+            @Choice(isCorrect: false) {
+                ``CambiumIncremental/ReuseOracle`` does not support
+                node kinds that contain other node kinds.
+
+                @Justification(reaction: "Try again") {
+                    The oracle works for any kind; the issue is
+                    grammar-specific.
+                }
+            }
+
+            @Choice(isCorrect: true) {
+                A binary expression's precedence context is encoded
+                by the *caller*'s `minPrecedence`, not by the subtree
+                itself. Splicing one in at the wrong precedence
+                would silently change associativity.
+
+                @Justification(reaction: "That's right") {
+                    A safer policy could re-check precedence at the
+                    splice site, but the example takes the
+                    conservative route and only reuses
+                    structurally-self-contained kinds.
+                }
+            }
+
+            @Choice(isCorrect: false) {
+                Binary expressions never survive byte-range
+                invalidation.
+
+                @Justification(reaction: "Try again") {
+                    Many binary expressions in real edits are
+                    completely outside the modified region, so
+                    invalidation alone wouldn't disqualify them.
+                }
+            }
+        }
+
+        @MultipleChoice {
+            What does
+            ``CambiumBuilder/SubtreeReuseOutcome/direct`` indicate
+            after a `reuseSubtree(_:)` call?
+
+            @Choice(isCorrect: false) {
+                The subtree's text was identical to its surrounding
+                context.
+
+                @Justification(reaction: "Try again") {
+                    Outcome classification is about *namespace*
+                    identity, not text equivalence.
+                }
+            }
+
+            @Choice(isCorrect: true) {
+                The previous tree's namespace matched the new
+                builder's namespace, so the green subtree was spliced
+                in as-is — no dynamic tokens were re-interned.
+
+                @Justification(reaction: "That's right") {
+                    `.direct` is the goal in long-lived sessions.
+                    Reaching it requires forwarding the
+                    ``CambiumBuilder/GreenTreeContext`` across
+                    reparses (or sharing a
+                    ``CambiumBuilder/SharedTokenInterner``, covered
+                    in Chapter 4).
+                }
+            }
+
+            @Choice(isCorrect: false) {
+                The splice succeeded without copying any green nodes.
+
+                @Justification(reaction: "Try again") {
+                    Both `.direct` and `.remapped` produce a fully-
+                    spliced subtree. The distinction is whether
+                    dynamic-token text had to be re-interned to
+                    reach the new namespace.
+                }
+            }
+        }
+    }
+}

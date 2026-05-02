@@ -1,0 +1,251 @@
+@Tutorial(time: 25) {
+    @Intro(title: "Drive a GreenTreeBuilder") {
+        With the kind enum in place, you can write a recursive-descent
+        parser that emits into a ``CambiumBuilder/GreenTreeBuilder``. The
+        builder accepts a stream of `startNode` / `token` / `staticToken`
+        / `finishNode` calls and produces a green tree whose structure
+        mirrors the calls one-for-one.
+
+        In this tutorial you build the calculator parser's literal-and-
+        group core: integer literals, real literals, parenthesized
+        groups, and trivia. Operator precedence and error recovery come
+        in the next tutorial; here the focus is the *vocabulary* of the
+        builder API and the lifecycle that turns a parse into a
+        ``CambiumCore/SyntaxTree``.
+    }
+
+    @Section(title: "A given lexer") {
+        @ContentAndMedia {
+            The parser consumes a flat token stream produced by a
+            standalone tokenizer. The lexer never touches Cambium types
+            beyond a single `TextRange` helper, so we treat it as a
+            black box and focus on the parse side.
+
+            For the full tokenizer source see
+            [`CalculatorLexer.swift`](https://github.com/daig/cambium/blob/main/Examples/Calculator/Sources/CalculatorCore/CalculatorLexer.swift)
+            in the sample.
+        }
+
+        @Steps {
+            @Step {
+                The lexer yields a flat array of `LexedToken` values
+                with kinds matching the calculator grammar plus a
+                trailing `.eof` sentinel. The parser will consume this
+                array index-by-index.
+
+                @Code(name: "CalculatorLexer.swift", file: "02-lexer-given.swift")
+            }
+        }
+    }
+
+    @Section(title: "Open the parser around a builder") {
+        @ContentAndMedia {
+            The parser owns a ``CambiumBuilder/GreenTreeBuilder`` and
+            walks the lexed tokens. Both the parser and the builder are
+            `~Copyable` — Cambium uses move-only ownership to make tree
+            construction unambiguous about which builder owns which
+            in-progress node stack.
+        }
+
+        @Steps {
+            @Step {
+                Create `CalculatorParser.swift` with a `~Copyable`
+                struct that holds the lexed tokens, a current index,
+                and a builder. The convenience initializer
+                `GreenTreeBuilder()` mints a fresh
+                ``CambiumBuilder/GreenTreeContext`` — a paired
+                ``CambiumCore/TokenInterner`` and
+                ``CambiumBuilder/GreenNodeCache`` under one namespace.
+
+                @Code(name: "CalculatorParser.swift", file: "02-parser-01-skeleton.swift")
+            }
+
+            @Step {
+                Add `parse()` as the entry point. It bookends the work
+                with ``CambiumBuilder/GreenTreeBuilder/startNode(_:)`` /
+                ``CambiumBuilder/GreenTreeBuilder/finishNode()`` on the
+                root kind, leaves a placeholder `parsePrefix()` for the
+                expression body, and consumes leading trivia so
+                whitespace before the first token still ends up in the
+                tree.
+
+                Cambium throws if the open/finish stack ever goes
+                unbalanced — every `startNode` must match a `finishNode`
+                before the builder is consumed.
+
+                @Code(name: "CalculatorParser.swift", file: "02-parser-02-root.swift")
+            }
+        }
+    }
+
+    @Section(title: "Emit nodes and tokens") {
+        @ContentAndMedia {
+            Every leaf in the tree is a token; every internal grouping
+            is a node. The builder offers four token APIs:
+            ``CambiumBuilder/GreenTreeBuilder/staticToken(_:)`` for
+            kinds whose text comes from the language definition,
+            ``CambiumBuilder/GreenTreeBuilder/token(_:text:)`` for
+            dynamic-text kinds, ``CambiumBuilder/GreenTreeBuilder/largeToken(_:text:)``
+            for inherently unique payloads (long string literals), and
+            ``CambiumBuilder/GreenTreeBuilder/missingToken(_:)`` for
+            placeholders the parser invented during recovery.
+
+            Mixing them up — calling `token(.plus, text: "+")` for a
+            static-text kind — throws
+            ``CambiumBuilder/GreenTreeBuilderError/staticKindRequiresStaticToken(_:)``,
+            so schema mistakes surface at the call site instead of
+            corrupting the tree.
+        }
+
+        @Steps {
+            @Step {
+                Handle integer literals. The grammar wraps each literal
+                in an `integerExpr` node so the typed AST in Chapter 2
+                has a single point of dispatch for "this is an integer
+                literal." Inside the node the parser appends the token
+                via ``CambiumBuilder/GreenTreeBuilder/token(_:text:)`` —
+                the dynamic-text path interns the digit string in the
+                builder's ``CambiumBuilder/GreenNodeCache``, so two
+                occurrences of `42` share storage.
+
+                @Code(name: "CalculatorParser.swift", file: "02-parser-03-integer.swift")
+            }
+
+            @Step {
+                Add real literals and a `consumeTrivia()` helper.
+                Trivia is a token kind too — whitespace ends up *inside*
+                the tree (as a child of whatever node was most recently
+                opened) so the parsed source round-trips byte-for-byte.
+
+                @Code(name: "CalculatorParser.swift", file: "02-parser-04-real-and-trivia.swift")
+            }
+
+            @Step {
+                Add parenthesized groups. The two `(` / `)` tokens are
+                static text, so the parser emits them via
+                ``CambiumBuilder/GreenTreeBuilder/staticToken(_:)`` — no
+                string is repeated at the call site. The recursive call
+                to `parsePrefix()` opens a child expression *inside* the
+                already-open `groupExpr`, so the `(`, the inner
+                expression, and the `)` end up as siblings.
+
+                @Code(name: "CalculatorParser.swift", file: "02-parser-05-group.swift")
+            }
+        }
+    }
+
+    @Section(title: "Finish the parser and obtain a tree") {
+        @ContentAndMedia {
+            ``CambiumBuilder/GreenTreeBuilder/finish()`` consumes the
+            builder and returns a ``CambiumBuilder/GreenBuildResult``
+            holding the green root, the resolver sealed at finish time,
+            and the underlying ``CambiumBuilder/GreenTreeContext``. From
+            the build result you materialize a ``CambiumCore/SyntaxTree``
+            for traversal.
+        }
+
+        @Steps {
+            @Step {
+                Add a `consuming finish()` method that calls
+                `builder.finish()` and converts the snapshot into a
+                ``CambiumCore/SyntaxTree``. Then expose a top-level
+                `parseCalculator(_:)` convenience that runs the parser
+                end-to-end — useful for callers that do not need
+                session-level state.
+
+                @Code(name: "CalculatorParser.swift", file: "02-parser-06-finish.swift")
+            }
+
+            @Step {
+                Try the parser against `(42)`. Materialize the source
+                via ``CambiumCore/SyntaxNodeCursor/makeString()`` to
+                confirm losslessness, then walk the children with
+                ``CambiumCore/SyntaxNodeCursor/forEachChildOrToken(_:)``
+                to see the tree's shape: the root contains one
+                `groupExpr`, which contains a `(`, an `integerExpr`,
+                and a `)`.
+
+                @Code(name: "Demo.swift", file: "02-parser-07-tryout.swift")
+            }
+        }
+    }
+
+    @Assessments {
+        @MultipleChoice {
+            Why does `parsePrefix()` for `.leftParen` use
+            `staticToken(.leftParen)` instead of
+            `token(.leftParen, text: "(")`?
+
+            @Choice(isCorrect: false) {
+                `token(_:text:)` allocates a String per call site;
+                `staticToken` does not.
+
+                @Justification(reaction: "Try again") {
+                    Both APIs intern their bytes, so the allocation
+                    difference is not the reason. The right reason is
+                    structural.
+                }
+            }
+
+            @Choice(isCorrect: true) {
+                `.leftParen` is a static-text kind. The builder enforces
+                the kind/method pairing and would throw
+                ``CambiumBuilder/GreenTreeBuilderError/staticKindRequiresStaticToken(_:)``
+                if the parser called `token(.leftParen, text: "(")`.
+
+                @Justification(reaction: "That's right") {
+                    Cambium uses the static-vs-dynamic distinction at
+                    schema-define time. The builder enforces it at
+                    every call so a mismatched parser fails loudly
+                    instead of producing a silently malformed tree.
+                }
+            }
+
+            @Choice(isCorrect: false) {
+                `staticToken` automatically advances the lexer.
+
+                @Justification(reaction: "Try again") {
+                    None of the builder APIs touch the lexer — the
+                    parser is responsible for advancing through tokens.
+                }
+            }
+        }
+
+        @MultipleChoice {
+            What does ``CambiumCore/SyntaxNodeCursor/makeString()``
+            return when called on the root cursor?
+
+            @Choice(isCorrect: true) {
+                The full source text the parser consumed, byte-for-byte.
+
+                @Justification(reaction: "That's right") {
+                    A Cambium tree is lossless — trivia, operator text,
+                    and dynamic-token text are all stored, so
+                    `makeString()` walks the green tree on demand and
+                    rebuilds the original input.
+                }
+            }
+
+            @Choice(isCorrect: false) {
+                Only the text of significant tokens (operators and
+                literals); trivia is omitted.
+
+                @Justification(reaction: "Try again") {
+                    Cambium stores trivia in the tree and replays it.
+                    Filtering trivia is a *consumer* choice, not the
+                    default representation.
+                }
+            }
+
+            @Choice(isCorrect: false) {
+                A debug description with kind names interleaved.
+
+                @Justification(reaction: "Try again") {
+                    `makeString()` returns the original source.
+                    Debug-style dumps live in helpers like
+                    `calculatorDebugTree(_:)` in the sample.
+                }
+            }
+        }
+    }
+}

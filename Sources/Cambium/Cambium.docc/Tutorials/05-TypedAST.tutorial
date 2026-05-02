@@ -1,0 +1,195 @@
+@Tutorial(time: 25) {
+    @Intro(title: "Project a Typed AST Overlay") {
+        Cambium's CST stores everything as homogeneous nodes tagged
+        with a kind. That uniformity is what makes editing and reuse
+        cheap, but it leaves consumers to write `switch
+        node.kind { ... }` everywhere they want kind-specific behavior.
+
+        ``CambiumASTSupport`` provides the missing layer: define one
+        Swift struct per kind that conforms to
+        ``CambiumASTSupport/TypedSyntaxNode``, and the type system
+        starts carrying the kind invariant. The
+        ``CambiumSyntaxMacros/CambiumSyntaxNode(_:for:)`` macro
+        generates the boilerplate; the hand-written part is just the
+        accessors that decode each kind's structure.
+    }
+
+    @Section(title: "A grammar-specific protocol") {
+        @ContentAndMedia {
+            ``CambiumASTSupport/TypedSyntaxNode`` is the minimal
+            contract: it binds a Swift type to one
+            ``CambiumCore/RawSyntaxKind``. We refine it once per
+            grammar so every typed node in the calculator pins
+            `Lang == CalculatorLanguage`, and so all conformers can
+            share helper extensions without restating the language
+            type.
+        }
+
+        @Steps {
+            @Step {
+                Create `CalculatorTypedAST.swift` and define the
+                grammar-specific `CalculatorSyntaxNode` protocol that
+                refines ``CambiumASTSupport/TypedSyntaxNode``. The
+                protocol declares a `kind` requirement and a stored
+                `syntax` handle; an extension provides
+                `TypedSyntaxNode.rawKind` from the kind enum, plus a
+                failable `init?(_:)` that down-casts an arbitrary
+                handle.
+
+                @Code(name: "CalculatorTypedAST.swift", file: "05-ast-01-protocol.swift")
+            }
+
+            @Step {
+                Add `CalculatorTokenSyntax` for tokens. Token wrappers
+                aren't a Cambium primitive — they're a convenience that
+                lets evaluators read kind/range/text without opening
+                `withCursor` at every site. Including
+                `withTextUTF8(_:)` lets the evaluator in the next
+                tutorial parse literal bytes without going through
+                `String`.
+
+                @Code(name: "CalculatorTypedAST.swift", file: "05-ast-02-token-wrapper.swift")
+            }
+        }
+    }
+
+    @Section(title: "Generate node wrappers with the macro") {
+        @ContentAndMedia {
+            ``CambiumSyntaxMacros/CambiumSyntaxNode(_:for:)`` generates
+            the three things every typed wrapper needs: the `static
+            let kind` constant, the `let syntax: SyntaxNodeHandle<Lang>`
+            stored property, and the `init(unchecked:)` initializer.
+            All you write is the accessors specific to that kind.
+        }
+
+        @Steps {
+            @Step {
+                Add the first typed node — `IntegerExprSyntax` —
+                annotated with `@CambiumSyntaxNode`. The accessors
+                expose the digit literal and an optional leading `-`
+                token; both go through a shared `firstToken(kind:)`
+                helper that walks direct children with a borrowed
+                cursor.
+
+                @Code(name: "CalculatorTypedAST.swift", file: "05-ast-03-first-typed-node.swift")
+            }
+
+            @Step {
+                Add the remaining typed nodes one per grammar shape
+                plus the `CalculatorBinaryOperator` enum and its token
+                wrapper. The shared `expressionChildren` /
+                `expression(at:)` helpers give the unary, binary,
+                group, and round-call wrappers a uniform vocabulary
+                for addressing their expression children by index.
+
+                @Code(name: "CalculatorTypedAST.swift", file: "05-ast-04-all-nodes.swift")
+            }
+        }
+    }
+
+    @Section(title: "Tagged union over expression kinds") {
+        @ContentAndMedia {
+            Each typed node is a strong type, but most code that walks
+            the tree wants to dispatch *across* expression kinds —
+            "evaluate this expression, whatever its shape." A tagged
+            union over the six concrete typed nodes is the natural
+            entry point: the evaluator and constant-folder both
+            pattern-match on it.
+        }
+
+        @Steps {
+            @Step {
+                Define `ExprSyntax` as a tagged union over the six
+                expression-kind structs. The failable initializer
+                inspects the handle's kind and dispatches to the right
+                case; `syntax`, `range`, and the `init?(_:)` failure
+                path all flow through the union uniformly.
+
+                Also add `RootSyntax` so callers can entered the typed
+                world from `tree.rootHandle()`.
+
+                @Code(name: "CalculatorTypedAST.swift", file: "05-ast-05-expr-union.swift")
+            }
+        }
+    }
+
+    @Assessments {
+        @MultipleChoice {
+            What does the
+            ``CambiumSyntaxMacros/CambiumSyntaxNode(_:for:)`` macro
+            generate that the protocol cannot?
+
+            @Choice(isCorrect: false) {
+                The kind enum itself.
+
+                @Justification(reaction: "Try again") {
+                    The kind enum is hand-written and decorated with
+                    ``CambiumSyntaxMacros/CambiumSyntaxKind()`` in
+                    Tutorial 1.
+                }
+            }
+
+            @Choice(isCorrect: true) {
+                The stored `syntax: SyntaxNodeHandle<Lang>` property,
+                the `static let kind` constant, and the
+                `init(unchecked:)` initializer.
+
+                @Justification(reaction: "That's right") {
+                    Those three are the boilerplate; everything else
+                    — accessors, the failable `init?`, the protocol
+                    extension — lives in hand-written code.
+                }
+            }
+
+            @Choice(isCorrect: false) {
+                The implementation of every accessor.
+
+                @Justification(reaction: "Try again") {
+                    Accessors are hand-written. The macro has no
+                    knowledge of grammar shape beyond the kind
+                    constant.
+                }
+            }
+        }
+
+        @MultipleChoice {
+            Why expose the typed accessors as computed properties that
+            re-traverse on every read instead of storing them as fields
+            inside the wrapper?
+
+            @Choice(isCorrect: false) {
+                Computed properties are required for `Sendable`
+                conformance.
+
+                @Justification(reaction: "Try again") {
+                    `Sendable` does not constrain stored vs computed.
+                    The reason is structural.
+                }
+            }
+
+            @Choice(isCorrect: true) {
+                The wrapper would need to allocate child arrays at
+                construction time and keep them alive. Walking the
+                cursor on demand keeps the wrapper a tiny value type
+                — one handle wide.
+
+                @Justification(reaction: "That's right") {
+                    A typed wrapper is a *view* over the underlying
+                    CST. Storing children would defeat the borrowed-
+                    cursor model and double the memory footprint of
+                    every parsed expression.
+                }
+            }
+
+            @Choice(isCorrect: false) {
+                Cambium does not allow caching child handles outside
+                the borrow scope.
+
+                @Justification(reaction: "Try again") {
+                    Owned handles can be stored anywhere. The
+                    trade-off is allocation cost, not legality.
+                }
+            }
+        }
+    }
+}

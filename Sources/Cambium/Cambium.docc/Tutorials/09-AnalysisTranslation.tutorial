@@ -1,0 +1,205 @@
+@Tutorial(time: 30) {
+    @Intro(title: "Translate Analysis Across Edits") {
+        The witnesses you built in Tutorial 7 (replacement) and
+        Tutorial 8 (reparse) exist to make analysis caches *survive
+        edits*. Without translation every keystroke would invalidate
+        every memoized value — defeating the whole point of an
+        incremental tool.
+
+        In this tutorial you wire two ``CambiumAnalysis`` sidecars to
+        the evaluator, then thread cache entries through both
+        ``CambiumIncremental/ParseWitness`` (after a reparse) and
+        ``CambiumCore/ReplacementWitness`` (after a fold step). The
+        result is a session whose `:cached` view of evaluator
+        results carries forward through both editing modes.
+    }
+
+    @Section(title: "Sidecar storage") {
+        @ContentAndMedia {
+            ``CambiumAnalysis`` provides two complementary stores.
+            ``CambiumAnalysis/ExternalAnalysisCache`` is one
+            long-lived, single-typed memoization cache; entries are
+            keyed by ``CambiumCore/SyntaxNodeIdentity`` plus a
+            namespace string. ``CambiumAnalysis/SyntaxMetadataStore``
+            is a multi-typed sidecar where each
+            ``CambiumAnalysis/SyntaxDataKey`` stores values of one
+            type per node.
+
+            Both serialize concurrent reads and writes internally,
+            so they're suitable for sharing across structured-
+            concurrent evaluation passes (Chapter 4).
+        }
+
+        @Steps {
+            @Step {
+                Define the cache namespace, the two sidecar keys
+                (`evaluationOrder` for visit order,
+                `evaluationKind` for the value's discriminator), and
+                the helper that pairs an identity with the namespace
+                to make an
+                ``CambiumAnalysis/AnalysisCacheKey``.
+
+                @Code(name: "CalculatorEvaluator.swift", file: "09-eval-01-sidecars.swift")
+            }
+
+            @Step {
+                Wire the evaluator to consult `cache` on entry and
+                update both `cache` and `metadata` on exit. Cache
+                lookup happens in `evaluate(_:)` — the recursive
+                entry — so every recursive call benefits from prior
+                memoization within the same session.
+
+                @Code(name: "CalculatorEvaluator.swift", file: "09-eval-02-cache-wired.swift")
+            }
+        }
+    }
+
+    @Section(title: "Survive an incremental reparse") {
+        @ContentAndMedia {
+            After a reparse, every node in the new tree has a fresh
+            ``CambiumCore/SyntaxNodeIdentity`` — even nodes whose
+            green storage is shared with the old tree. The
+            ``CambiumIncremental/ParseWitness/reusedSubtrees``
+            triples (`oldPath`, `newPath`, `green`) are exactly the
+            data we need to translate cache entries from the old
+            identities to the new ones.
+        }
+
+        @Steps {
+            @Step {
+                Add the `CalculatorSession` shape that owns the cache
+                and the per-pass metadata store, plus an `evaluate()`
+                that constructs an evaluator with both attached.
+
+                @Code(name: "CalculatorSession.swift", file: "09-session-01-cache-state.swift")
+            }
+
+            @Step {
+                Add `translateEvaluationCache(from:to:witness:)` for
+                the reparse case. For each reused subtree, walk the
+                OLD descendants by path, look up each cache entry,
+                rewrite the path's prefix from `reuse.oldPath` to
+                `reuse.newPath`, and re-set the entry on the NEW
+                tree.
+
+                Then call ``CambiumAnalysis/ExternalAnalysisCache/removeValues(notMatching:)``
+                to bulk-evict any leftovers whose ``CambiumCore/TreeID``
+                no longer matches — the canonical garbage-collection
+                step.
+
+                @Code(name: "CalculatorSession.swift", file: "09-session-02-translate-reparse.swift")
+            }
+        }
+    }
+
+    @Section(title: "Survive a constant-fold replacement") {
+        @ContentAndMedia {
+            ``CambiumCore/ReplacementWitness/classify(path:)`` is the
+            symmetric primitive for fold steps. For each cache entry
+            in the old tree:
+
+            - `.unchanged` → carry the value to the same path in the
+              new tree.
+            - `.replacedRoot` → set the new path's value explicitly
+              from the literal we just produced.
+            - `.ancestor` and `.deleted` → drop.
+        }
+
+        @Steps {
+            @Step {
+                Add the second `translateEvaluationCache` overload —
+                the one that runs after each `applyFold` from
+                Tutorial 7. Carry every `.unchanged` entry, then seed
+                the new literal node with the freshly-computed value.
+
+                Once both translation paths exist, the
+                ``CambiumAnalysis/ExternalAnalysisCache`` survives
+                reparses *and* fold passes — the witnesses from
+                Tutorial 7 and 8 finally pay off.
+
+                @Code(name: "CalculatorSession.swift", file: "09-session-03-translate-replace.swift")
+            }
+        }
+    }
+
+    @Assessments {
+        @MultipleChoice {
+            Why does the reparse-translation walk the *old* tree
+            instead of the *new* one?
+
+            @Choice(isCorrect: false) {
+                Because new-tree paths are not yet computable when
+                the witness is built.
+
+                @Justification(reaction: "Try again") {
+                    The witness has both paths — that's the whole
+                    point. Direction is a deliberate choice.
+                }
+            }
+
+            @Choice(isCorrect: true) {
+                The cache entries are keyed by *old* identities. We
+                walk the old tree to find the keys, look them up in
+                the cache snapshot, then translate each found path
+                to its new counterpart and re-set under the new
+                identity.
+
+                @Justification(reaction: "That's right") {
+                    Walking the new tree would require re-deriving
+                    which old identity each new node corresponds to
+                    — exactly the problem the path-rewriting saves
+                    you from.
+                }
+            }
+
+            @Choice(isCorrect: false) {
+                Because the new tree may not yet exist when
+                translation runs.
+
+                @Justification(reaction: "Try again") {
+                    Translation runs *after* the new tree has been
+                    built; the witness already references it.
+                }
+            }
+        }
+
+        @MultipleChoice {
+            What does ``CambiumAnalysis/ExternalAnalysisCache/removeValues(notMatching:)``
+            do, and why is it safe to call after every translation
+            pass?
+
+            @Choice(isCorrect: false) {
+                Removes entries the GC has marked unreachable — the
+                pass enables reachability tracking.
+
+                @Justification(reaction: "Try again") {
+                    There is no separate reachability tracker.
+                    Eviction is bulk and tree-version-based.
+                }
+            }
+
+            @Choice(isCorrect: true) {
+                Drops every entry whose ``CambiumCore/TreeID`` does
+                not match the supplied tree. After translation, the
+                only entries we care about belong to the new tree;
+                the call efficiently sweeps the rest.
+
+                @Justification(reaction: "That's right") {
+                    `TreeID` partitions the cache by tree version,
+                    so a single `removeValues(notMatching:)` call
+                    erases stale state from every prior version in
+                    one pass.
+                }
+            }
+
+            @Choice(isCorrect: false) {
+                Removes only entries older than the cache's TTL.
+
+                @Justification(reaction: "Try again") {
+                    The cache has no time-based expiry.
+                    Invalidation is structural.
+                }
+            }
+        }
+    }
+}

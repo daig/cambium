@@ -9,6 +9,12 @@ considering using concrete syntax trees as its output. We'll walk
 through a complete example from defining a language all the way to
 walking the resulting tree.
 
+> Tip: This article is a narrative skim of Cambium's API. For a
+> hands-on, step-by-step build of a more substantial calculator with
+> precedence, error recovery, incremental reparse, witness-driven
+> analysis caches, parallel evaluation, and serialization — see
+> <doc:tutorials/TableOfContents>.
+
 We'll support addition and subtraction on integers, with parentheses
 for grouping. The user is allowed to write nested expressions like
 `1-(2+5)`.

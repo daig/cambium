@@ -1,0 +1,230 @@
+@Tutorial(time: 25) {
+    @Intro(title: "Read the Tree Without Allocating") {
+        A Cambium tree is meant to be queried frequently — by IDEs on
+        every keystroke, by analyzers walking every node, by formatters
+        emitting bytes. To stay within reasonable memory and ARC
+        budgets the primary traversal API is borrowed: walks happen
+        through `~Copyable` cursors handed to a closure, and source
+        text is exposed as a chunk-streaming view rather than a
+        materialized `String`.
+
+        In this tutorial you implement six REPL commands — `:tree`,
+        `:at`, `:cover`, `:contains`, `:find`, `:slice`, `:hash`,
+        `:nodes`, `:tokens` — each one a different shape of borrowed
+        or owned tree access.
+    }
+
+    @Section(title: "Walk with borrowed cursors") {
+        @ContentAndMedia {
+            ``CambiumCore/SyntaxTree/withRoot(_:)`` and
+            ``CambiumCore/SharedSyntaxTree/withRoot(_:)`` both hand a
+            borrowed ``CambiumCore/SyntaxNodeCursor`` to your closure.
+            Inside the closure you can iterate children with
+            ``CambiumCore/SyntaxNodeCursor/forEachChild(_:)``,
+            ``CambiumCore/SyntaxNodeCursor/forEachChildOrToken(_:)``
+            (interleaving tokens with nodes), or descend recursively
+            with ``CambiumCore/SyntaxNodeCursor/visitPreorder(_:)``.
+        }
+
+        @Steps {
+            @Step {
+                Create `CalculatorDebugDump.swift` with a stub
+                `calculatorDebugTree(_:)` that returns an empty
+                string. The next step fills it in.
+
+                @Code(name: "CalculatorDebugDump.swift", file: "04-debug-01-empty.swift")
+            }
+
+            @Step {
+                Implement the dump as a recursive walk over borrowed
+                cursors. The `withRoot` closure receives a borrowed
+                cursor on the root; `forEachChildOrToken` interleaves
+                node and token children in source order so trivia ends
+                up between significant siblings.
+
+                Because the cursor is borrowed (via a `borrowing`
+                parameter), the recursive call costs zero ARC traffic.
+
+                @Code(name: "CalculatorDebugDump.swift", file: "04-debug-02-borrowed-walk.swift")
+            }
+        }
+    }
+
+    @Section(title: "Position-based queries") {
+        @ContentAndMedia {
+            Cambium ships two positional queries built on the cursor
+            API: ``CambiumCore/SyntaxNodeCursor/withTokenAtOffset(_:none:single:between:)``
+            for "what token owns this byte?" and
+            ``CambiumCore/SyntaxNodeCursor/withCoveringElement(_:_:)``
+            for "what's the smallest element covering this range?"
+            Both shapes are core to building IDE features like cursor
+            inspection and syntax-aware selection.
+        }
+
+        @Steps {
+            @Step {
+                Add `describeToken(at:)` and `describeCovering(_:)`
+                methods on `CalculatorParseResult`. The token query
+                forces the caller to address all three cases —
+                off-the-end, inside-a-token, and at-a-boundary — by
+                accepting a closure per case.
+
+                @Code(name: "CalculatorParseResult.swift", file: "04-result-01-position-queries.swift")
+            }
+        }
+    }
+
+    @Section(title: "Stream source text as bytes") {
+        @ContentAndMedia {
+            ``CambiumCore/SyntaxNodeCursor/withText(_:)`` exposes the
+            subtree's bytes through a ``CambiumCore/SyntaxText`` view
+            that walks the green tree on demand and yields chunks
+            straight from the resolver's interned bytes — no copies,
+            no `String` allocation. `SyntaxText` offers `contains`,
+            `firstRange(of:)`, and `sliced(_:)` over the chunk view, so
+            most byte-level scans stay allocation-free for the
+            document.
+        }
+
+        @Steps {
+            @Step {
+                Add `sourceContains`, `sourceFirstRange(of:)`, and
+                `sourceSlice(_:)`. Only the *needle* is materialized
+                as an `Array` — the document is streamed.
+
+                For `sourceSlice` the range is bounds-checked against
+                `text.utf8Count` since `SyntaxText.sliced(_:)` traps
+                on out-of-bounds ranges.
+
+                @Code(name: "CalculatorParseResult.swift", file: "04-result-02-syntaxtext.swift")
+            }
+
+            @Step {
+                Define a custom ``CambiumCore/UTF8Sink`` and feed the
+                source bytes into it via
+                ``CambiumCore/SyntaxText/writeUTF8(to:)``. Here the sink
+                is an FNV-1a hasher; the same shape works for
+                checksums, byte counters, or any other reduction over
+                the document.
+
+                The sink's `write(_:)` is called once per chunk in the
+                green tree. Two parses of identical source feed the
+                same byte sequence into the hasher and produce
+                identical hashes.
+
+                @Code(name: "CalculatorParseResult.swift", file: "04-result-03-utf8sink.swift")
+            }
+        }
+    }
+
+    @Section(title: "Owned handles for stored references") {
+        @ContentAndMedia {
+            Borrowed cursors cannot escape their closure — that is
+            what makes them allocation-free. When you need to store a
+            node reference, send it across actors, or iterate in an
+            order the cursor API does not directly support, promote
+            it to an owned ``CambiumCore/SyntaxNodeHandle`` (or
+            ``CambiumCore/SyntaxTokenHandle``).
+
+            Handles are copyable, `Sendable`, `Hashable`, and carry an
+            ARC retain on the underlying tree storage. Allocate them
+            for end-of-pipeline storage; do not allocate them per-node
+            during a hot walk.
+
+            ``CambiumOwnedTraversal`` provides the convenience
+            allocators the REPL uses for `:nodes` and `:tokens`.
+        }
+
+        @Steps {
+            @Step {
+                Add `expressionHandles` and `tokenHandles(in:)` on
+                `CalculatorParseResult`. The first uses
+                ``CambiumOwnedTraversal`` to materialize every
+                descendant handle in preorder, then filters to
+                expression-shape kinds. The second uses
+                `SyntaxNodeHandle.tokenHandles(in:)` (also from
+                ``CambiumOwnedTraversal``) to materialize a range of
+                token handles.
+
+                @Code(name: "CalculatorParseResult.swift", file: "04-result-04-owned-handles.swift")
+            }
+        }
+    }
+
+    @Assessments {
+        @MultipleChoice {
+            What does ``CambiumCore/SyntaxText`` allow you to do that
+            ``CambiumCore/SyntaxNodeCursor/makeString()`` does not?
+
+            @Choice(isCorrect: false) {
+                Mutate the source bytes in place.
+
+                @Justification(reaction: "Try again") {
+                    `SyntaxText` is read-only. Editing happens via
+                    `SharedSyntaxTree.replacing(_:with:context:)` —
+                    covered in Chapter 3.
+                }
+            }
+
+            @Choice(isCorrect: true) {
+                Read the document chunk-by-chunk through a
+                ``CambiumCore/UTF8Sink`` without materializing a
+                `String` for the whole source.
+
+                @Justification(reaction: "That's right") {
+                    `SyntaxText` is the streaming view; `makeString()`
+                    is the materializing convenience. For hashing,
+                    scanning, and large-document reads, prefer
+                    `withText`.
+                }
+            }
+
+            @Choice(isCorrect: false) {
+                Modify the tree's structure.
+
+                @Justification(reaction: "Try again") {
+                    `SyntaxText` exposes only the read view; tree
+                    structure is not addressable through it.
+                }
+            }
+        }
+
+        @MultipleChoice {
+            When should you reach for an owned
+            ``CambiumCore/SyntaxNodeHandle`` instead of staying inside
+            a borrowed-cursor closure?
+
+            @Choice(isCorrect: false) {
+                Whenever the tree exceeds 1000 nodes.
+
+                @Justification(reaction: "Try again") {
+                    Tree size is not the deciding factor. Borrowed
+                    cursors stay efficient regardless of node count.
+                }
+            }
+
+            @Choice(isCorrect: true) {
+                When you need to store the reference, send it across
+                actors, or pass it to APIs that take owned handles
+                (typed AST overlays, analysis caches).
+
+                @Justification(reaction: "That's right") {
+                    Handles cost an ARC retain and an `Array`
+                    allocation per call to the owned-traversal
+                    helpers; the trade is worth it once the reference
+                    needs to outlive the borrow scope.
+                }
+            }
+
+            @Choice(isCorrect: false) {
+                For every leaf token, to keep the cursor stack short.
+
+                @Justification(reaction: "Try again") {
+                    Borrowed cursors do not stack-allocate per node;
+                    making handles for every token would just churn
+                    the heap.
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,198 @@
+@Tutorial(time: 20) {
+    @Intro(title: "Evaluate the Typed AST") {
+        With the typed AST in place from Tutorial 5, an evaluator
+        becomes a recursive function that pattern-matches on
+        `ExprSyntax`. Each kind has a closed structure — its operands
+        and operator are addressable through the typed accessors —
+        so the evaluator stays small and total.
+
+        Along the way you will see ``CambiumCore/SyntaxTokenCursor/withTextUTF8(_:)``
+        as the byte-level alternative to materializing literal text:
+        an integer literal can be parsed straight from the token's
+        UTF-8 bytes without any intermediate `String`.
+    }
+
+    @Section(title: "Domain types") {
+        @ContentAndMedia {
+            Cambium does not know what your language's *values* look
+            like. The calculator's value type is a tagged union over
+            integers and reals; the error type carries source ranges
+            so the REPL can echo the offending position.
+        }
+
+        @Steps {
+            @Step {
+                Define `CalculatorValue` and `CalculatorEvaluationError`.
+                The error cases reuse Cambium's
+                ``CambiumCore/TextRange`` so callers can render the
+                error position against the source document the parser
+                consumed.
+
+                @Code(name: "CalculatorValue.swift", file: "06-eval-01-types.swift")
+            }
+        }
+    }
+
+    @Section(title: "An entry point and per-kind dispatch") {
+        @ContentAndMedia {
+            The evaluator opens the tree with `withRoot`, projects the
+            root through `RootSyntax`, and then recurses through
+            `ExprSyntax`'s union cases. Every case ultimately calls
+            back into `evaluate(_:)`, so a single mutable evaluator
+            instance can carry per-pass state — a counter, a cache,
+            metadata sidecars (added in Chapter 3).
+        }
+
+        @Steps {
+            @Step {
+                Add `evaluateCalculatorTree(_:)` as the public entry
+                point and a `CalculatorEvaluator` struct whose
+                `evaluate(_:)` method dispatches on `ExprSyntax`. The
+                kind-specific helpers are stubs for now; the next
+                steps fill them in.
+
+                Notice the evaluator opens `withRoot` and projects
+                through `RootSyntax` exactly once — once we are inside
+                `evaluate(_:)` the typed accessors traverse the green
+                tree on demand.
+
+                @Code(name: "CalculatorEvaluator.swift", file: "06-eval-02-entry.swift")
+            }
+        }
+    }
+
+    @Section(title: "Read literals through borrowed bytes") {
+        @ContentAndMedia {
+            Integer evaluation runs on every literal in every parse.
+            Materializing each token's text as a `String` is wasteful
+            when all we need is the digit bytes. ``CambiumASTSupport``'s
+            token wrapper exposes ``CambiumCore/SyntaxTokenCursor/withTextUTF8(_:)``
+            which hands the closure a borrowed
+            `UnsafeBufferPointer<UInt8>` over the token's UTF-8 bytes
+            — no copy, no `String` allocation on the happy path.
+        }
+
+        @Steps {
+            @Step {
+                Add `evaluateInteger(_:)` and `evaluateReal(_:)`. The
+                integer path runs `parseInt64` against the borrowed
+                bytes; the real path falls back to `Double(_:)` (the
+                stdlib has no from-bytes parser) but still avoids the
+                `token.text` allocation on success.
+
+                The error path materializes `token.text` for the
+                diagnostic; that allocation is bounded to the literal,
+                not the document.
+
+                @Code(name: "CalculatorEvaluator.swift", file: "06-eval-03-literals.swift")
+            }
+        }
+    }
+
+    @Section(title: "Recurse into compound expressions") {
+        @ContentAndMedia {
+            The remaining four cases — unary, group, round-call,
+            binary — recurse into `evaluate(_:)` for their sub-
+            expressions. The code stays close to the structure of the
+            grammar because the typed accessors are kind-specific.
+        }
+
+        @Steps {
+            @Step {
+                Fill in the four compound evaluators. Each one fetches
+                its operand(s) through the typed accessor, recurses
+                via `evaluate(_:)`, and combines the results with
+                arithmetic that surfaces overflow / non-finite results
+                as `CalculatorEvaluationError`.
+
+                The binary evaluator delegates to two helpers
+                (`evaluateIntegerBinary` and `evaluateRealBinary`)
+                that switch over `CalculatorBinaryOperator`; the
+                actual integer/real arithmetic is unrelated to
+                Cambium and lives in a separate file in the sample.
+
+                @Code(name: "CalculatorEvaluator.swift", file: "06-eval-04-recursive.swift")
+            }
+        }
+    }
+
+    @Assessments {
+        @MultipleChoice {
+            Why does the integer evaluator use
+            ``CambiumCore/SyntaxTokenCursor/withTextUTF8(_:)`` rather
+            than `token.text`?
+
+            @Choice(isCorrect: false) {
+                `withTextUTF8` is asynchronous and yields back to the
+                runtime.
+
+                @Justification(reaction: "Try again") {
+                    `withTextUTF8` is synchronous. The advantage is
+                    elsewhere.
+                }
+            }
+
+            @Choice(isCorrect: true) {
+                It exposes the token's bytes through a borrowed buffer
+                pointer, so a parser like `parseInt64` can run without
+                allocating a `String` per literal.
+
+                @Justification(reaction: "That's right") {
+                    On the happy path the only allocations are
+                    whatever your parser does. For an integer parser
+                    that's zero allocations.
+                }
+            }
+
+            @Choice(isCorrect: false) {
+                `token.text` is not implemented for tokens whose kind
+                is dynamic-text.
+
+                @Justification(reaction: "Try again") {
+                    `token.text` works for all token kinds — it
+                    materializes the bytes through the resolver. The
+                    issue is allocation cost, not availability.
+                }
+            }
+        }
+
+        @MultipleChoice {
+            What does the evaluator gain from `ExprSyntax` being a
+            tagged union rather than a free-form `SyntaxNodeHandle`?
+
+            @Choice(isCorrect: false) {
+                A `~Copyable` constraint that prevents accidental
+                tree retention.
+
+                @Justification(reaction: "Try again") {
+                    `ExprSyntax` is fully copyable. Ownership control
+                    sits in the tree storage, not in the typed
+                    overlay.
+                }
+            }
+
+            @Choice(isCorrect: true) {
+                Exhaustive `switch` coverage. Adding a new expression
+                kind is a compiler error in every consumer that
+                pattern-matches on `ExprSyntax`.
+
+                @Justification(reaction: "That's right") {
+                    Exhaustiveness is the central reason to project a
+                    typed overlay over the homogeneous CST. The
+                    compiler enforces that every kind has a handler
+                    everywhere.
+                }
+            }
+
+            @Choice(isCorrect: false) {
+                Direct mutation of expression children.
+
+                @Justification(reaction: "Try again") {
+                    Cambium trees are persistent. Editing happens via
+                    `replacing(_:with:context:)`, which builds a new
+                    tree.
+                }
+            }
+        }
+    }
+}

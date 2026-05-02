@@ -122,6 +122,10 @@ modules directly.
 
 - <doc:GettingStarted>
 
+### Tutorials
+
+- <doc:tutorials/TableOfContents>
+
 ### Sample Code
 
 - <doc:CalculatorExample>

@@ -1,0 +1,178 @@
+@Tutorial(time: 25) {
+    @Intro(title: "Parallel Parsing with Shared Interning") {
+        Parallel parsing splits work across worker tasks: each
+        worker parses an independent subtree concurrently, then a
+        master builder splices the worker results into one logical
+        tree. The correctness-critical question is how the workers
+        share token-text vocabulary and the green-node namespace.
+
+        ``CambiumBuilder/SharedTokenInterner`` is the answer.
+        Externalize the interner, hand each worker a per-thread
+        ``CambiumBuilder/GreenTreeContext`` bound to that interner,
+        and every cross-context splice into a master builder takes
+        the ``CambiumBuilder/SubtreeReuseOutcome/direct`` fast path
+        — no dynamic-token remapping at merge time.
+    }
+
+    @Section(title: "Report shape") {
+        @ContentAndMedia {
+            We pair the parsed trees with the interner that backed
+            them. Holding the interner is what gives downstream
+            consumers the ability to splice worker trees into a
+            larger build through the same namespace.
+
+            Two metrics surface dedup effectiveness: total dynamic
+            tokens minted across all workers vs. distinct interner
+            keys used. A small ratio is the *whole point* of
+            sharing the interner.
+        }
+
+        @Steps {
+            @Step {
+                Define `ParallelParseReport`. The
+                ``CambiumBuilder/SharedTokenInterner`` is the
+                load-bearing handle — clients can keep parsing
+                against the same vocabulary, splice into other
+                builders, or persist it for editor warm-restart.
+
+                @Code(name: "CalculatorParallelParser.swift", file: "11-pparse-01-shape.swift")
+            }
+        }
+    }
+
+    @Section(title: "Spawn workers against the shared interner") {
+        @ContentAndMedia {
+            Each worker gets its own
+            ``CambiumBuilder/GreenTreeContext`` (and therefore its
+            own ``CambiumBuilder/GreenNodeCache``) but shares one
+            interner. That means:
+
+            - Token-text vocabulary is unified across workers from
+              birth — two workers parsing `"1 + 2"` and `"1 + 3"`
+              mint the *same* ``CambiumCore/TokenKey`` for `"1"`.
+            - Green-node caches stay per-worker, so workers don't
+              contend on a shared cache during the hot parse path.
+            - Splicing any worker tree into a master builder bound
+              to the same interner takes
+              ``CambiumBuilder/SubtreeReuseOutcome/direct`` — no
+              remapping cost at merge time.
+        }
+
+        @Steps {
+            @Step {
+                Add `parseCalculatorExpressionsInParallel(_:interner:)`.
+                The worker body is the standard parser flow with the
+                explicit context constructor. `withThrowingTaskGroup`
+                gives us deterministic ordering by re-indexing
+                results back into input order.
+
+                @Code(name: "CalculatorParallelParser.swift", file: "11-pparse-02-workers.swift")
+            }
+
+            @Step {
+                Demonstrate the master-merge pattern: a top-level
+                builder bound to the same interner splices each
+                worker tree via
+                ``CambiumBuilder/GreenTreeBuilder/reuseSubtree(_:)``.
+                The outcome is `.direct` for every splice because
+                both contexts share the same namespace — Cambium
+                does no remapping work at all.
+
+                The same pattern scales to richer top-level
+                grammars where the master parser identifies
+                independently-parseable regions, dispatches workers
+                to fill them, and weaves the results into one
+                lossless CST.
+
+                @Code(name: "MasterMerge.swift", file: "11-pparse-03-master-merge.swift")
+            }
+        }
+    }
+
+    @Assessments {
+        @MultipleChoice {
+            Why does sharing a
+            ``CambiumBuilder/SharedTokenInterner`` matter for
+            *merge cost* rather than *parse cost*?
+
+            @Choice(isCorrect: false) {
+                Per-worker interners would crash inside the
+                lock-free implementation.
+
+                @Justification(reaction: "Try again") {
+                    Per-worker interners work fine for parsing —
+                    they only become a problem at merge time.
+                }
+            }
+
+            @Choice(isCorrect: true) {
+                With per-worker interners, every dynamic token in a
+                spliced subtree must be re-interned into the
+                master's namespace
+                (``CambiumBuilder/SubtreeReuseOutcome/remapped``).
+                A shared interner makes the splice take
+                ``CambiumBuilder/SubtreeReuseOutcome/direct`` —
+                identity is preserved, no remap work.
+
+                @Justification(reaction: "That's right") {
+                    Sharing the interner is the externalized-
+                    interning pattern's central pay-off: parallel
+                    parses fold into one logical tree without any
+                    re-interning at merge time.
+                }
+            }
+
+            @Choice(isCorrect: false) {
+                The shared interner avoids contention on the
+                green-node cache.
+
+                @Justification(reaction: "Try again") {
+                    Workers still own their *own* green-node caches.
+                    The shared piece is just the interner.
+                }
+            }
+        }
+
+        @MultipleChoice {
+            What is the role of `policy: .documentLocal` on each
+            worker's `GreenTreeContext`?
+
+            @Choice(isCorrect: false) {
+                It tells Cambium that the worker's tree is
+                read-only.
+
+                @Justification(reaction: "Try again") {
+                    `GreenCachePolicy` only affects the green-node
+                    cache's lifetime/sizing, not the tree's
+                    mutability.
+                }
+            }
+
+            @Choice(isCorrect: true) {
+                It declares the cache scope as one-document — the
+                cache is bounded to this single parse. Long-lived
+                editor sessions use
+                ``CambiumBuilder/GreenCachePolicy/parseSession(maxEntries:)``
+                instead.
+
+                @Justification(reaction: "That's right") {
+                    Document-local is the right scope for a
+                    one-shot worker; parse-session is the right
+                    scope for a session that reparses repeatedly.
+                }
+            }
+
+            @Choice(isCorrect: false) {
+                It enables document-level mutex protection on the
+                cache.
+
+                @Justification(reaction: "Try again") {
+                    The policy never adds locking. Per-worker
+                    caches stay single-owner; cross-worker sharing
+                    would require ``CambiumBuilder/SharedGreenNodeCache``,
+                    a separate construct.
+                }
+            }
+        }
+    }
+}

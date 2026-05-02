@@ -1,0 +1,182 @@
+@Tutorial(time: 25) {
+    @Intro(title: "Fork-Join Evaluation Across Tasks") {
+        ``CambiumCore/SharedSyntaxTree`` is `Sendable`. Cambium's red
+        layer realizes lazily under lock-free atomic slots, so two
+        tasks descending into different siblings of the same parent
+        never observe inconsistent state. The typed AST overlays are
+        also `Sendable, Hashable`, so passing a sub-expression to a
+        child task is just an argument pass.
+
+        In this tutorial you write a structured-concurrent fork/join
+        evaluator that spawns the LHS and RHS of every `BinaryExpr`
+        into concurrent child tasks via `async let`, sharing one
+        ``CambiumAnalysis/ExternalAnalysisCache`` and one
+        ``CambiumAnalysis/SyntaxMetadataStore`` across every task.
+    }
+
+    @Section(title: "Public entry point") {
+        @ContentAndMedia {
+            The async entry mirrors the sequential evaluator's
+            shape: open the tree with `withRoot`, project the root
+            through `RootSyntax`, then descend with the parallel
+            recursive helper. The cache and metadata store are
+            optional inputs — pass them when you want cross-task
+            memoization, omit them for a fresh evaluation per call.
+        }
+
+        @Steps {
+            @Step {
+                Add `evaluateCalculatorTreeInParallel(_:cache:metadata:)`
+                plus a small `ParallelEvaluationReport` for stats. The
+                `withRoot` projection is borrowed (not async), so the
+                root traversal happens synchronously and only the
+                recursive descent goes parallel.
+
+                @Code(name: "CalculatorParallelEvaluator.swift", file: "10-peval-01-entry.swift")
+            }
+        }
+    }
+
+    @Section(title: "Fork at every binary expression") {
+        @ContentAndMedia {
+            `async let` is Swift's structured-concurrency primitive
+            for spawning a child task whose lifetime is bounded by
+            the surrounding scope. By placing one `async let` per
+            operand of every `BinaryExpr`, the evaluator forks across
+            both branches and awaits both before combining.
+
+            Single-operand kinds (`unary`, `group`, `roundCall`)
+            don't benefit from forking — splitting a sequential
+            recurse adds task-switching overhead with no parallel
+            work to offset it.
+        }
+
+        @Steps {
+            @Step {
+                Implement the recursive `evaluateInParallel`. The
+                fork point is `case .binary` — `async let
+                leftValueAsync = …` and `async let rightValueAsync =
+                …` start two child tasks, and `try await` joins
+                them.
+
+                Notice how cache lookup and update bracket the
+                recursion on every node: with the cache attached, a
+                second pass over the same tree short-circuits at the
+                root with one cache hit and zero forks.
+
+                @Code(name: "CalculatorParallelEvaluator.swift", file: "10-peval-02-recursive.swift")
+            }
+        }
+    }
+
+    @Section(title: "Mutex-protected cross-task stats") {
+        @ContentAndMedia {
+            Multiple tasks updating shared state need
+            synchronization. The `Synchronization` module's `Mutex`
+            offers a `withLock` API whose closure runs while holding
+            the lock — exactly the shape needed for atomic
+            increments.
+
+            Cambium's analysis sidecars
+            (``CambiumAnalysis/ExternalAnalysisCache`` and
+            ``CambiumAnalysis/SyntaxMetadataStore``) follow the same
+            pattern internally, which is why they're safe to share
+            across tasks without external locking.
+        }
+
+        @Steps {
+            @Step {
+                Add `ParallelEvalStatsBox` — the `enter`/`exit`
+                bracket measures the high-water mark of in-flight
+                tasks; the rest record discrete events.
+
+                The box is `@unchecked Sendable` because its
+                synchronization story is the mutex, not Swift's
+                automatic `Sendable` checking.
+
+                @Code(name: "CalculatorParallelEvaluator.swift", file: "10-peval-03-stats-box.swift")
+            }
+        }
+    }
+
+    @Assessments {
+        @MultipleChoice {
+            What allows two child tasks to descend into different
+            siblings of the same parent at the same time without
+            synchronization at the call site?
+
+            @Choice(isCorrect: false) {
+                Cambium's parser pre-computes every red-tree node
+                during `finish()`.
+
+                @Justification(reaction: "Try again") {
+                    The red layer is realized lazily; pre-computing
+                    every node would defeat its memory advantages.
+                }
+            }
+
+            @Choice(isCorrect: true) {
+                The red layer realizes lazily under lock-free
+                atomic slots, so concurrent first-realizations of
+                the same node race safely and concurrent reads from
+                different parts of the tree don't contend at all.
+
+                @Justification(reaction: "That's right") {
+                    The atomic-slot model is what makes
+                    `SharedSyntaxTree` genuinely `Sendable` rather
+                    than just nominally — tasks can carve up work
+                    arbitrarily.
+                }
+            }
+
+            @Choice(isCorrect: false) {
+                The evaluator must take a global lock at the root.
+
+                @Justification(reaction: "Try again") {
+                    There is no global lock. Each task descends
+                    independently; the cache and metadata store are
+                    the only shared state, and they have their own
+                    internal locks.
+                }
+            }
+        }
+
+        @MultipleChoice {
+            Why is splitting `unary` / `group` / `roundCall` into
+            child tasks not worthwhile?
+
+            @Choice(isCorrect: false) {
+                Cambium does not allow `async let` over single
+                values.
+
+                @Justification(reaction: "Try again") {
+                    `async let` works over any expression. The
+                    objection is performance, not legality.
+                }
+            }
+
+            @Choice(isCorrect: true) {
+                These kinds have a single operand, so the parent
+                cannot run anything in parallel with the recursion
+                — task-switching overhead would be pure cost with
+                no concurrent work to offset it.
+
+                @Justification(reaction: "That's right") {
+                    Forks are profitable at fan-out points where two
+                    branches can run concurrently. Single-operand
+                    kinds have no fan-out.
+                }
+            }
+
+            @Choice(isCorrect: false) {
+                These kinds are not `Sendable`.
+
+                @Justification(reaction: "Try again") {
+                    All typed AST overlays in this grammar are
+                    `Sendable`. The choice not to fork is purely
+                    about avoiding overhead.
+                }
+            }
+        }
+    }
+}
