@@ -2,6 +2,9 @@
 
 import Cambium
 
+/// One subtree replacement applied during folding. Carries the
+/// witness returned by `replacing(_:with:context:)` so consumers can
+/// translate references through the change.
 public struct FoldStep: Sendable {
     public let oldKind: CalculatorKind
     public let newKind: CalculatorKind
@@ -12,11 +15,14 @@ public struct FoldStep: Sendable {
     public let newTree: SharedSyntaxTree<CalculatorLanguage>
 }
 
+/// The full record of a fold pass: every step in order plus the
+/// final tree.
 public struct FoldReport: Sendable {
     public let steps: [FoldStep]
     public let finalTree: SharedSyntaxTree<CalculatorLanguage>
 }
 
+/// One foldable expression discovered in a tree.
 internal struct FoldCandidate {
     var handle: SyntaxNodeHandle<CalculatorLanguage>
     var path: SyntaxNodePath
@@ -25,6 +31,7 @@ internal struct FoldCandidate {
     var literal: FoldLiteral
 }
 
+/// The replacement literal we'd splice for a given evaluated value.
 internal struct FoldLiteral {
     var value: CalculatorValue
     var expressionKind: CalculatorKind
@@ -33,11 +40,17 @@ internal struct FoldLiteral {
     var needsLeadingMinus: Bool
 }
 
+/// First foldable expression in `tree`, discovered by post-order
+/// walk. Children fold before their parents, so a single pass picks
+/// the innermost evaluable position.
 internal func firstFoldCandidate(
     in tree: SharedSyntaxTree<CalculatorLanguage>
 ) -> FoldCandidate? {
     tree.withRoot { root in
         var candidate: FoldCandidate?
+        // `walkPreorder` emits both `.enter` and `.leave` events.
+        // Acting on `.leave` gives us post-order: children visited
+        // before their parents.
         _ = root.walkPreorder { event in
             switch event {
             case .enter:
@@ -64,6 +77,10 @@ internal func firstFoldCandidate(
     }
 }
 
+/// Whether `expression` is foldable: every direct operand must
+/// already be a literal, in which case we evaluate it. Recursive
+/// folding happens by repeated passes — one fold per call until
+/// `firstFoldCandidate` returns `nil`.
 private func evaluatedValue(for expression: ExprSyntax) -> CalculatorValue? {
     switch expression {
     case .integer, .real:
@@ -96,6 +113,7 @@ private func makeLiteral(for value: CalculatorValue) -> FoldLiteral? {
         )
     case .real(let value):
         guard value.isFinite else { return nil }
+        // Real literal canonicalization elided for tutorial brevity.
         return nil
     }
 }
@@ -109,6 +127,9 @@ private extension ExprSyntax {
     }
 }
 
+/// Bundles a `FoldStep` with the noncopyable context the next
+/// iteration will consume. Swift tuples can't yet hold `~Copyable`
+/// elements, so this struct fills the same role.
 internal struct FoldApplyOutput: ~Copyable {
     var step: FoldStep
     private var context: GreenTreeContext<CalculatorLanguage>

@@ -7,6 +7,11 @@ public final class CalculatorSession {
     private var lastTree: SharedSyntaxTree<CalculatorLanguage>?
     private var lastDiagnostics: [Diagnostic<CalculatorLanguage>] = []
     private var incremental = IncrementalParseSession<CalculatorLanguage>()
+
+    // Long-lived analysis state. The cache must outlive every reparse
+    // so memoized values can survive across edits; the metadata store
+    // is replaced on each pass because evaluation order is per-pass-
+    // relative.
     private let evaluationCache = ExternalAnalysisCache<CalculatorLanguage, CalculatorValue>()
     private var evaluationMetadata = SyntaxMetadataStore<CalculatorLanguage>()
 
@@ -42,6 +47,9 @@ public final class CalculatorSession {
         let tree = output.build.snapshot.makeSyntaxTree().intoShared()
         let nextContext = output.build.intoContext()
 
+        // Translate the prior cache through the parse witness BEFORE
+        // we evict old-tree entries — entries whose paths landed
+        // inside reused subtrees move to their new identities.
         let witness = makeParseWitness(previousTree: previousTree, newTree: tree)
         if let previousTree {
             translateEvaluationCache(
@@ -57,6 +65,9 @@ public final class CalculatorSession {
         return tree
     }
 
+    /// Evaluate the current tree, memoizing results in the long-lived
+    /// `ExternalAnalysisCache` and recording per-node metadata in a
+    /// fresh `SyntaxMetadataStore`.
     public func evaluate() throws -> CalculatorValue {
         guard let tree = lastTree else {
             throw CalculatorEvaluationError.invalidSyntax("no current document")
@@ -80,6 +91,20 @@ public final class CalculatorSession {
         )
     }
 
+    /// Translate evaluation-cache entries from `previousTree` to
+    /// `newTree` across an incremental reparse, using the
+    /// ``CambiumIncremental/ParseWitness`` produced in Tutorial 8.
+    ///
+    /// For each reused subtree:
+    ///
+    ///   1. Walk every descendant of the OLD subtree by path.
+    ///   2. Look up its cache entry by old `SyntaxNodeIdentity`.
+    ///   3. If found, compute the corresponding NEW path (rewrite
+    ///      the old prefix to the new prefix) and re-set the entry
+    ///      under the new identity.
+    ///
+    /// After translation, evict any leftover entries whose `TreeID`
+    /// no longer matches the current tree.
     func translateEvaluationCache(
         from previousTree: SharedSyntaxTree<CalculatorLanguage>,
         to newTree: SharedSyntaxTree<CalculatorLanguage>,
@@ -92,6 +117,8 @@ public final class CalculatorSession {
         previousTree.withRoot { oldRoot in
             newTree.withRoot { newRoot in
                 for reuse in witness.reusedSubtrees {
+                    // `withDescendant(atPath:_:)` walks an absolute
+                    // path from the root.
                     _ = oldRoot.withDescendant(atPath: reuse.oldPath) { oldReuseRoot in
                         oldReuseRoot.forEachDescendant(includingSelf: true) { oldNode in
                             let oldHandle = oldNode.makeHandle()
@@ -100,6 +127,9 @@ public final class CalculatorSession {
                             )
                             guard let value = snapshot[oldKey] else { return }
 
+                            // Translate path: drop the old subtree
+                            // prefix, then prepend the new subtree
+                            // prefix.
                             let fullOldPath = oldNode.childIndexPath()
                             let relativePath = SyntaxNodePath(
                                 fullOldPath.dropFirst(reuse.oldPath.count)
@@ -117,6 +147,10 @@ public final class CalculatorSession {
             }
         }
 
+        // Bulk-evict entries from old tree versions. Any cached
+        // value whose `TreeID` doesn't match `newTree.treeID` is now
+        // unreachable — `removeValues(notMatching:)` is the
+        // canonical garbage-collection step.
         evaluationCache.removeValues(notMatching: newTree.treeID)
     }
 

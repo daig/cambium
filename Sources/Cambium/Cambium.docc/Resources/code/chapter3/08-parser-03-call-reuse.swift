@@ -2,8 +2,23 @@
 
 import Cambium
 
+/// Bundles the noncopyable build result with the diagnostics array.
+/// Swift tuples cannot yet hold `~Copyable` elements, so this struct
+/// fills the same role.
+struct CalculatorBuildOutput: ~Copyable {
+    var build: GreenBuildResult<CalculatorLanguage>
+    var diagnostics: [Diagnostic<CalculatorLanguage>]
+}
+
 struct CalculatorParser: ~Copyable {
     private static let prefixPrecedence = 3
+    /// The kinds we consider for subtree reuse. Atomic prefix forms
+    /// are safe to splice as-is — their identity does not depend on
+    /// surrounding context. `binaryExpr` is *deliberately excluded*:
+    /// a binary expression's precedence context is encoded by the
+    /// caller's `minPrecedence`, not by the subtree itself, so
+    /// splicing one in at the wrong precedence would silently change
+    /// associativity.
     private static let reusableKinds: [CalculatorKind] = [
         .groupExpr, .roundCallExpr, .unaryExpr, .realExpr, .integerExpr,
     ]
@@ -12,6 +27,11 @@ struct CalculatorParser: ~Copyable {
     private var currentIndex: Int
     private var builder: GreenTreeBuilder<CalculatorLanguage>
     private var diagnostics: [Diagnostic<CalculatorLanguage>]
+
+    // Incremental-reuse inputs. The previous tree and edits come from
+    // the surrounding session; the session also owns the
+    // `IncrementalParseSession` so its counters aggregate across many
+    // parses.
     private let previousTree: SharedSyntaxTree<CalculatorLanguage>?
     private let edits: [TextEdit]
     private let incremental: IncrementalParseSession<CalculatorLanguage>?
@@ -32,6 +52,7 @@ struct CalculatorParser: ~Copyable {
         self.incremental = incremental
     }
 
+    /// One-shot init for callers that don't need session-level state.
     init(input: String) {
         self.init(
             input: input,
@@ -243,13 +264,23 @@ struct CalculatorParser: ~Copyable {
 }
 
 extension CalculatorParser {
+    /// Try to splice an unchanged subtree from the previous parse at
+    /// the parser's current source offset. Returns `true` when a
+    /// subtree was reused (and the lexer was advanced past its
+    /// bytes), `false` otherwise.
     mutating func tryReusePrefix(at newOffset: TextSize) throws -> Bool {
         guard let previousTree else { return false }
 
+        // The parser walks NEW-source coordinates. The reuse oracle
+        // walks OLD-tree coordinates. `mapNewOffsetToOld` translates
+        // by replaying the edits.
         guard let oldOffset = Self.mapNewOffsetToOld(newOffset, edits: edits) else {
             return false
         }
 
+        // The oracle is `~Copyable`, so we mint one locally inside
+        // each prefix attempt. The session reference (carried inside
+        // the oracle) is what aggregates counters across attempts.
         let oracle = ReuseOracle<CalculatorLanguage>(
             previousTree: previousTree,
             edits: edits,
@@ -277,10 +308,19 @@ extension CalculatorParser {
     ) throws -> Bool {
         var spliced = false
         try oracle.withReusableNode(startingAt: oldOffset, kind: kind) { cursor in
+            // Cambium hands the closure a borrowed cursor on the
+            // candidate subtree from the *previous* tree. The
+            // closure decides whether the splice is safe; here we
+            // verify byte-length alignment in the new lexer, then
+            // splice via `reuseSubtree`.
             guard let tokenCount = tokenCountMatching(text: cursor.makeString()) else {
                 return
             }
             let outcome = try builder.reuseSubtree(cursor)
+            // `outcome` is `.direct` (namespaces matched, no
+            // remapping) or `.remapped` (dynamic tokens were re-
+            // interned into the new namespace). Both produce a
+            // structurally-equivalent subtree.
             _ = outcome
             skipTokens(count: tokenCount)
             spliced = true
@@ -307,6 +347,11 @@ extension CalculatorParser {
         }
     }
 
+    /// Translate a NEW-source byte offset into OLD-tree coordinates.
+    /// `edits` are non-overlapping and sorted by start in OLD coords
+    /// per the ``CambiumIncremental/ParseInput`` contract. Returns
+    /// `nil` if the new offset falls inside an edit's replacement
+    /// region — there is no corresponding old offset.
     static func mapNewOffsetToOld(
         _ newOffset: TextSize,
         edits: [TextEdit]

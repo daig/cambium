@@ -10,6 +10,8 @@ public func evaluateCalculatorTree(
 }
 
 internal struct CalculatorEvaluator {
+    /// Open the tree, project the root through `RootSyntax`, and
+    /// evaluate the (single) root expression.
     mutating func evaluateTree(
         _ tree: SharedSyntaxTree<CalculatorLanguage>
     ) throws -> CalculatorValue {
@@ -42,6 +44,12 @@ internal struct CalculatorEvaluator {
         }
     }
 
+    /// Parse the integer literal directly from the token's UTF-8 bytes.
+    ///
+    /// `withTextUTF8` exposes the token's bytes through a borrowed
+    /// buffer pointer — there is no `String` allocation per token.
+    /// `parseInt64` accumulates digits with overflow checks; on the
+    /// rare error path we materialize `text` for the diagnostic.
     private mutating func evaluateInteger(_ expression: IntegerExprSyntax) throws -> CalculatorValue {
         guard let token = expression.literal else {
             throw CalculatorEvaluationError.unsupportedSyntax(
@@ -59,6 +67,10 @@ internal struct CalculatorEvaluator {
         return .integer(expression.minusSign != nil ? -value : value)
     }
 
+    /// Reals fall back to `Double(_:)` because the stdlib has no
+    /// from-bytes parser. We still avoid `token.makeString()` on the
+    /// happy path by going through `withTextUTF8` and decoding the
+    /// borrowed slice directly.
     private mutating func evaluateReal(_ expression: RealExprSyntax) throws -> CalculatorValue {
         guard let token = expression.literal else {
             throw CalculatorEvaluationError.unsupportedSyntax(

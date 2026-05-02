@@ -26,6 +26,9 @@ public extension CalculatorSyntaxNode {
     }
 }
 
+/// Typed wrapper for a single token. Surfaces the token's kind, range,
+/// and text without forcing callers to open a `withCursor` scope at
+/// every read site.
 public struct CalculatorTokenSyntax: Sendable, Hashable {
     public let syntax: SyntaxTokenHandle<CalculatorLanguage>
 
@@ -45,6 +48,9 @@ public struct CalculatorTokenSyntax: Sendable, Hashable {
         syntax.withCursor { $0.makeString() }
     }
 
+    /// Stream the token's UTF-8 bytes through `body` without
+    /// allocating a `String`. The literal-parsing evaluator in
+    /// Tutorial 6 uses this to read integers byte-by-byte.
     public func withTextUTF8<R>(
         _ body: (UnsafeBufferPointer<UInt8>) throws -> R
     ) throws -> R {
@@ -54,6 +60,7 @@ public struct CalculatorTokenSyntax: Sendable, Hashable {
     }
 }
 
+/// The four binary operators in the Calculator grammar.
 public enum CalculatorBinaryOperator: Sendable, Hashable {
     case add, subtract, multiply, divide
 
@@ -68,6 +75,9 @@ public enum CalculatorBinaryOperator: Sendable, Hashable {
     }
 }
 
+/// A binary-operator token paired with its decoded operator. Built
+/// from `BinaryExprSyntax.operatorToken` after a successful kind
+/// match.
 public struct CalculatorBinaryOperatorTokenSyntax: Sendable, Hashable {
     public let token: CalculatorTokenSyntax
     public let operatorKind: CalculatorBinaryOperator
@@ -83,16 +93,38 @@ public struct CalculatorBinaryOperatorTokenSyntax: Sendable, Hashable {
     public var range: TextRange { token.range }
 }
 
+/// `IntegerExprSyntax` wraps every node whose kind is `.integerExpr`.
+///
+/// The ``CambiumSyntaxMacros/CambiumSyntaxNode(_:for:)`` macro
+/// generates the boilerplate: the `kind` constant, the stored `syntax`
+/// handle, and the unchecked initializer the protocol requires. Only
+/// the typed accessors are hand-written.
 @CambiumSyntaxNode(CalculatorKind.self, for: .integerExpr)
 public struct IntegerExprSyntax: CalculatorSyntaxNode {
-    public var literal: CalculatorTokenSyntax? { firstToken(kind: .number) }
-    public var minusSign: CalculatorTokenSyntax? { firstToken(kind: .minus) }
+    /// The digit token that holds the literal's text.
+    public var literal: CalculatorTokenSyntax? {
+        firstToken(kind: .number)
+    }
+
+    /// The leading `-` when the literal carries a sign. `nil` for
+    /// non-negative literals.
+    public var minusSign: CalculatorTokenSyntax? {
+        firstToken(kind: .minus)
+    }
 }
 
 @CambiumSyntaxNode(CalculatorKind.self, for: .realExpr)
 public struct RealExprSyntax: CalculatorSyntaxNode {
-    public var literal: CalculatorTokenSyntax? { firstToken(kind: .realNumber) }
-    public var minusSign: CalculatorTokenSyntax? { firstToken(kind: .minus) }
+    /// The digit-and-dot token that holds the literal's text.
+    public var literal: CalculatorTokenSyntax? {
+        firstToken(kind: .realNumber)
+    }
+
+    /// The leading `-` when the literal carries a sign. `nil` for
+    /// non-negative literals.
+    public var minusSign: CalculatorTokenSyntax? {
+        firstToken(kind: .minus)
+    }
 }
 
 @CambiumSyntaxNode(CalculatorKind.self, for: .unaryExpr)
@@ -151,6 +183,8 @@ internal extension CalculatorSyntaxNode {
         return CalculatorBinaryOperatorTokenSyntax(token)
     }
 
+    /// First direct token child whose kind matches `kind`. The
+    /// borrowed-cursor scope ensures iteration is allocation-free.
     func firstToken(kind: CalculatorKind) -> CalculatorTokenSyntax? {
         firstToken(where: { $0 == kind })
     }

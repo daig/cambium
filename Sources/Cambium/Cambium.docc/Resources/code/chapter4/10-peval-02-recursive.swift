@@ -18,6 +18,9 @@ public func evaluateCalculatorTreeInParallel(
     cache: ExternalAnalysisCache<CalculatorLanguage, CalculatorValue>? = nil,
     metadata: SyntaxMetadataStore<CalculatorLanguage>? = nil
 ) async throws -> (value: CalculatorValue, report: ParallelEvaluationReport) {
+    // Project the root through the typed AST exactly as the
+    // sequential evaluator does. `SharedSyntaxTree.withRoot` is safe
+    // to call from any task.
     let entry: ExprSyntax = try tree.withRoot { rootCursor in
         guard let root = RootSyntax(rootCursor.makeHandle()),
               let only = root.expressions.first,
