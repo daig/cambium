@@ -104,3 +104,28 @@ import Testing
     #expect(ObjectIdentifier(resolver as AnyObject) == ObjectIdentifier(interner))
 }
 
+@Test func sharedTokenInternerCountTracksUniqueKeys() {
+    let interner = SharedTokenInterner()
+    #expect(interner.count == 0)
+
+    _ = interner.intern("alpha")
+    _ = interner.intern("beta")
+    _ = interner.intern("alpha")  // dedup; count unchanged
+
+    #expect(interner.count == 2)
+
+    _ = interner.intern("gamma")
+    #expect(interner.count == 3)
+}
+
+@Test func sharedTokenInternerLargeTextCountTracksAppendsWithoutDedup() {
+    let interner = SharedTokenInterner()
+    #expect(interner.largeTextCount == 0)
+
+    _ = interner.storeLargeText("payload-a")
+    _ = interner.storeLargeText("payload-b")
+    _ = interner.storeLargeText("payload-a")  // no dedup; count grows
+
+    #expect(interner.largeTextCount == 3)
+}
+

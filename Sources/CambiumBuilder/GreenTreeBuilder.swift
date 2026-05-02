@@ -308,10 +308,7 @@ public final class SharedTokenInterner: TokenResolver, TokenInterner, @unchecked
     }
 
     private func internValidated(_ text: String, bytes: UnsafeBufferPointer<UInt8>) -> TokenKey {
-        internValidated(text, keyBytes: Array(bytes))
-    }
-
-    private func internValidated(_ text: String, keyBytes: [UInt8]) -> TokenKey {
+        let keyBytes = Array(bytes)
         let shardIndex = SharedTokenInternerKeyLayout.shardIndex(
             forHash: keyBytes.hashValue,
             shardCount: shards.count
@@ -397,6 +394,24 @@ public final class SharedTokenInterner: TokenResolver, TokenInterner, @unchecked
     /// valid because `SharedTokenInterner` does not evict.
     public func makeResolver() -> any TokenResolver {
         self
+    }
+
+    /// Total number of distinct interned token texts across every shard.
+    /// Inspecting this in long-lived editor sessions is the cheapest way
+    /// to observe vocabulary growth and check for shard exhaustion before
+    /// it traps. Acquires every shard mutex sequentially; intended for
+    /// telemetry, not the inner loop.
+    public var count: Int {
+        shards.reduce(0) { running, shard in
+            running + shard.mutex.withLock { $0.textByKey.count }
+        }
+    }
+
+    /// Number of large-text payloads stored. `SharedTokenInterner` does
+    /// not deduplicate large text, so each `storeLargeText(_:)` call
+    /// increments this by one.
+    public var largeTextCount: Int {
+        largeTexts.mutex.withLock { $0.count }
     }
 }
 
@@ -509,11 +524,14 @@ final class GreenNodeCacheStorage<Lang: SyntaxLanguage>: @unchecked Sendable {
 
 /// Move-only green-node cache.
 ///
-/// Owns the token interner and dedupes recurring green nodes during build.
-/// Carry an instance forward across builders via
-/// ``CambiumBuilder/GreenBuildResult/intoCache()`` to preserve structural sharing and
-/// token-key namespace identity for incremental reparse. See
-/// ``CambiumBuilder/GreenCachePolicy`` for caching rules and thresholds.
+/// Pure structural-dedup pool for recurring green nodes during build.
+/// The cache does not own a token interner — it is bound to one via
+/// ``CambiumBuilder/GreenTreeContext``, and forwarded across builders
+/// inside that context via
+/// ``CambiumBuilder/GreenBuildResult/intoContext()`` to preserve
+/// structural sharing and token-key namespace identity for incremental
+/// reparse. See ``CambiumBuilder/GreenCachePolicy`` for caching rules
+/// and thresholds.
 ///
 /// The cache is `~Copyable` so its ownership is unambiguous: there is
 /// always exactly one owner of a given cache, and that owner can hand it
@@ -698,6 +716,26 @@ public struct GreenTreeContext<Lang: SyntaxLanguage>: ~Copyable {
         self.interner = interner
         self.cache = cache
     }
+
+    /// The active green-node cache policy.
+    public var cachePolicy: GreenCachePolicy { cache.policy }
+
+    /// Number of green-cache lookups that returned an existing entry.
+    /// See ``CambiumBuilder/GreenNodeCache/hitCount``.
+    public var cacheHitCount: Int { cache.hitCount }
+
+    /// Number of green-cache lookups that inserted a new entry.
+    /// See ``CambiumBuilder/GreenNodeCache/missCount``.
+    public var cacheMissCount: Int { cache.missCount }
+
+    /// Number of green-cache calls that skipped the cache entirely
+    /// (disabled policy or a wide-node bypass).
+    /// See ``CambiumBuilder/GreenNodeCache/bypassCount``.
+    public var cacheBypassCount: Int { cache.bypassCount }
+
+    /// Number of green-cache entries removed by FIFO eviction.
+    /// See ``CambiumBuilder/GreenNodeCache/evictionCount``.
+    public var cacheEvictionCount: Int { cache.evictionCount }
 }
 
 /// A thread-safe, sharded ``CambiumBuilder/GreenNodeCache`` for cross-builder use.
@@ -914,12 +952,30 @@ public struct GreenBuildResult<Lang: SyntaxLanguage>: ~Copyable {
     /// Consume this result and return the context for the next builder.
     /// Carries (interner, cache) as a unit — namespace pairing preserved.
     ///
-    /// Read ``root``, ``resolver``, ``snapshot``, or
-    /// `snapshot.makeSyntaxTree()` before calling this method — the
-    /// result is consumed.
+    /// Read ``root``, ``resolver``, ``snapshot``,
+    /// `snapshot.makeSyntaxTree()`, or any of the cache-statistics
+    /// accessors below before calling this method — the result is
+    /// consumed.
     public consuming func intoContext() -> GreenTreeContext<Lang> {
         GreenTreeContext(interner: interner, cache: cache)
     }
+
+    /// Number of green-cache lookups during this build that returned an
+    /// existing entry. See ``CambiumBuilder/GreenNodeCache/hitCount``.
+    public var cacheHitCount: Int { cache.hitCount }
+
+    /// Number of green-cache lookups during this build that inserted a
+    /// new entry. See ``CambiumBuilder/GreenNodeCache/missCount``.
+    public var cacheMissCount: Int { cache.missCount }
+
+    /// Number of green-cache calls during this build that skipped the
+    /// cache entirely (disabled policy or wide-node bypass).
+    /// See ``CambiumBuilder/GreenNodeCache/bypassCount``.
+    public var cacheBypassCount: Int { cache.bypassCount }
+
+    /// Number of green-cache entries removed by FIFO eviction during this
+    /// build. See ``CambiumBuilder/GreenNodeCache/evictionCount``.
+    public var cacheEvictionCount: Int { cache.evictionCount }
 }
 
 /// How `GreenTreeBuilder.reuseSubtree(_:)` accepted a subtree.
@@ -928,8 +984,8 @@ public struct GreenBuildResult<Lang: SyntaxLanguage>: ~Copyable {
 /// the source tree (`.direct`) or had to rebuild the subtree because the
 /// source resolver's token-key namespace did not match the builder's
 /// (`.remapped`). A high `.remapped` rate in incremental parsing usually
-/// signals that the integrator failed to carry the cache forward through
-/// `result.intoCache()`.
+/// signals that the integrator failed to carry the context forward
+/// through `result.intoContext()`.
 public enum SubtreeReuseOutcome: Sendable, Hashable {
     /// The source resolver shared this builder's token-key namespace, so the
     /// green node was appended directly. Storage identity is preserved.
@@ -1762,19 +1818,19 @@ public extension SharedSyntaxTree {
     /// ``CambiumCore/TokenInterner/makeResolver()`` covering every key
     /// referenced by the new tree.
     ///
-    /// If only the replacement shares this tree's namespace but the
-    /// context does not, this tree's resolver is reused as-is. If the
-    /// replacement was taken from a fresher snapshot of the same shared
-    /// interner, rendering may precondition-fail on keys that postdate
-    /// this tree's snapshot. Pass a namespace-matching context to avoid
-    /// this.
+    /// If the target tree shares the context's interner but the
+    /// replacement does not, the replacement's dynamic token keys are
+    /// remapped into the context's interner and the result tree carries
+    /// a fresh resolver from that interner.
     ///
-    /// If neither the replacement nor the context shares this tree's
-    /// namespace, replacement falls back to an overlay resolver. That
-    /// fallback preserves structural sharing and correctness, but
-    /// intentionally exposes no `tokenKeyNamespace`; future
-    /// `reuseSubtree` calls with a context must remap dynamic token keys
-    /// instead of direct-reusing the overlay-backed green storage.
+    /// In every other case — including the subtle one where the
+    /// replacement and target share a namespace but the context does
+    /// not — replacement falls back to an overlay resolver. The overlay
+    /// preserves structural sharing and correctness (every key in the
+    /// new tree resolves correctly), but intentionally exposes no
+    /// `tokenKeyNamespace`; future `reuseSubtree` calls with a context
+    /// must remap dynamic token keys instead of direct-reusing the
+    /// overlay-backed green storage.
     func replacing(
         _ handle: SyntaxNodeHandle<Lang>,
         with replacement: ResolvedGreenNode<Lang>,

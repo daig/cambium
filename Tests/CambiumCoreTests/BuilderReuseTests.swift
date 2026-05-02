@@ -133,3 +133,46 @@ import Testing
     let expected = (0..<4).map { "shared\($0)common" }.joined()
     #expect(masterTree.withRoot { $0.makeString() } == expected)
 }
+
+@Test func greenBuildResultExposesCacheStatistics() throws {
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.root)
+    // Two identical tokens — the second hits the cache.
+    try builder.token(.identifier, text: "x")
+    try builder.token(.identifier, text: "x")
+    try builder.finishNode()
+    let result = try builder.finish()
+
+    // The exact counters depend on the language's static-token shape,
+    // but with a non-disabled policy and two equal dynamic tokens we
+    // should observe at least one hit and one miss, and zero bypasses.
+    #expect(result.cacheHitCount >= 1)
+    #expect(result.cacheMissCount >= 1)
+    #expect(result.cacheBypassCount == 0)
+    #expect(result.cacheEvictionCount == 0)
+}
+
+@Test func greenBuildResultResolverIsSealedAtFinishForSharedInterner() throws {
+    // For SharedTokenInterner-backed builds, `result.resolver` should
+    // be the live interner instance — i.e., the same object regardless
+    // of mutations the user makes between reads. A stored `let`
+    // (versus a computed property re-invoking `makeResolver()`) is the
+    // performance contract.
+    let interner = SharedTokenInterner()
+    var builder = GreenTreeBuilder<TestLanguage>(interner: interner)
+    builder.startNode(.root)
+    try builder.token(.identifier, text: "before")
+    try builder.finishNode()
+    let result = try builder.finish()
+
+    let firstRead = result.resolver
+    _ = interner.intern("after-finish")
+    let secondRead = result.resolver
+
+    // Both reads return the same interner instance.
+    #expect(ObjectIdentifier(firstRead as AnyObject)
+        == ObjectIdentifier(secondRead as AnyObject))
+    // And it is the live SharedTokenInterner the builder was bound to.
+    #expect(ObjectIdentifier(firstRead as AnyObject)
+        == ObjectIdentifier(interner))
+}
