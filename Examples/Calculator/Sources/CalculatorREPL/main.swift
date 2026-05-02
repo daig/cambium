@@ -64,7 +64,13 @@ struct CalculatorREPL {
                 continue
             case ":counters":
                 let c = session.counters
-                print("queries=\(c.reuseQueries) hits=\(c.reuseHits) reusedBytes=\(c.reusedBytes)")
+                let eval = session.evaluationStats
+                print(
+                    "queries=\(c.reuseQueries) hits=\(c.reuseHits) reusedBytes=\(c.reusedBytes) evalNodes=\(eval.evalNodes) evalHits=\(eval.evalHits)"
+                )
+                continue
+            case ":cached":
+                printCachedValues(session.cachedValues())
                 continue
             case ":reset":
                 session = CalculatorSession()
@@ -137,6 +143,7 @@ struct CalculatorREPL {
                     print("loaded \(bytes.count) bytes from \(path)")
                     printResult(
                         result,
+                        session: session,
                         showTree: showTree,
                         showTypedAST: showTypedAST
                     )
@@ -228,7 +235,8 @@ struct CalculatorREPL {
           :save <path>                write current clean tree snapshot
           :load <path>                load a tree snapshot as the document
           :fold                       constant-fold current document, showing witnesses
-          :counters                   print incremental reuse counters
+          :counters                   print incremental reuse and evaluator cache counters
+          :cached                     print cached evaluator values for the current tree
           :reset                      drop session state (cache, last tree, counters)
           :tree                       toggle CST dumps
           :ast                        toggle typed AST dumps
@@ -250,6 +258,7 @@ struct CalculatorREPL {
             lastResult = result
             printResult(
                 result,
+                session: session,
                 showTree: showTree,
                 showTypedAST: showTypedAST
             )
@@ -262,6 +271,7 @@ struct CalculatorREPL {
 
     private static func printResult(
         _ result: CalculatorParseResult,
+        session: CalculatorSession,
         showTree: Bool,
         showTypedAST: Bool
     ) {
@@ -280,11 +290,28 @@ struct CalculatorREPL {
         }
 
         do {
-            print(try result.evaluate())
+            print(try session.evaluate())
         } catch let error as CalculatorEvaluationError {
             print("error: \(error)")
         } catch {
             print("internal error: \(error)")
+        }
+    }
+
+    private static func printCachedValues(_ values: [CalculatorCachedValue]) {
+        guard !values.isEmpty else {
+            print("(cache empty)")
+            return
+        }
+
+        for value in values {
+            let metadata: String
+            if let order = value.evaluationOrder, let kind = value.valueKind {
+                metadata = " order=\(order) kind=\(kind)"
+            } else {
+                metadata = ""
+            }
+            print("\(format(value.range)) = \(value.value)\(metadata)")
         }
     }
 

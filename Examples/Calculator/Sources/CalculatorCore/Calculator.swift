@@ -135,6 +135,44 @@ public enum CalculatorValue: Sendable, Equatable, CustomStringConvertible {
     }
 }
 
+public enum CalculatorValueKind: String, Sendable, Equatable, CustomStringConvertible {
+    case integer
+    case real
+
+    public var description: String {
+        rawValue
+    }
+}
+
+public struct CalculatorEvaluationStats: Sendable, Equatable {
+    public var evalNodes: UInt64
+    public var evalHits: UInt64
+
+    public init(evalNodes: UInt64 = 0, evalHits: UInt64 = 0) {
+        self.evalNodes = evalNodes
+        self.evalHits = evalHits
+    }
+}
+
+public struct CalculatorCachedValue: Sendable, Equatable {
+    public let range: TextRange
+    public let value: CalculatorValue
+    public let evaluationOrder: Int?
+    public let valueKind: CalculatorValueKind?
+
+    public init(
+        range: TextRange,
+        value: CalculatorValue,
+        evaluationOrder: Int?,
+        valueKind: CalculatorValueKind?
+    ) {
+        self.range = range
+        self.value = value
+        self.evaluationOrder = evaluationOrder
+        self.valueKind = valueKind
+    }
+}
+
 public enum CalculatorEvaluationError: Error, Equatable, Sendable, CustomStringConvertible {
     case invalidSyntax(String)
     case integerLiteralOutOfRange(String, TextRange)
@@ -312,6 +350,23 @@ public enum ExprSyntax: Sendable, Hashable {
             expression.range
         }
     }
+
+    public var syntax: SyntaxNodeHandle<CalculatorLanguage> {
+        switch self {
+        case .integer(let expression):
+            expression.syntax
+        case .real(let expression):
+            expression.syntax
+        case .unary(let expression):
+            expression.syntax
+        case .binary(let expression):
+            expression.syntax
+        case .group(let expression):
+            expression.syntax
+        case .roundCall(let expression):
+            expression.syntax
+        }
+    }
 }
 
 @CambiumSyntaxNode(CalculatorKind.self, for: .root)
@@ -450,6 +505,9 @@ public final class CalculatorSession {
     private var lastTree: SharedSyntaxTree<CalculatorLanguage>?
     private var lastDiagnostics: [CalculatorDiagnostic] = []
     private let incremental = IncrementalParseSession<CalculatorLanguage>()
+    private let evaluationCache = ExternalAnalysisCache<CalculatorLanguage, CalculatorValue>()
+    private var evaluationMetadata = SyntaxMetadataStore<CalculatorLanguage>()
+    private var lastEvaluationStats = CalculatorEvaluationStats()
 
     public init() {}
 
@@ -464,6 +522,11 @@ public final class CalculatorSession {
         _ input: String,
         edits: [TextEdit] = []
     ) throws -> CalculatorParseResult {
+        let previousTree = lastTree
+        _ = incremental.consumeAcceptedReuses()
+        evaluationMetadata = SyntaxMetadataStore<CalculatorLanguage>()
+        lastEvaluationStats = CalculatorEvaluationStats()
+
         let builder: GreenTreeBuilder<CalculatorLanguage>
         if let existing = cache.take() {
             builder = GreenTreeBuilder(cache: existing)
@@ -474,7 +537,7 @@ public final class CalculatorSession {
         var parser = CalculatorParser(
             input: input,
             builder: consume builder,
-            previousTree: lastTree,
+            previousTree: previousTree,
             edits: edits,
             incremental: incremental
         )
@@ -486,8 +549,18 @@ public final class CalculatorSession {
         // is gone.
         let tree = output.build.snapshot.makeSyntaxTree().intoShared()
         let diagnostics = output.diagnostics
+        let acceptedReuses = output.acceptedReuses
         let nextCache = output.build.intoCache()
         let calculatorDiagnostics = diagnostics.map(CalculatorDiagnostic.init(_:))
+        let witness = makeParseWitness(
+            previousTree: previousTree,
+            newTree: tree,
+            acceptedReuses: acceptedReuses
+        )
+        if let previousTree {
+            translateEvaluationCache(from: previousTree, to: tree, witness: witness)
+        }
+        evaluationCache.removeValues(notMatching: tree.treeID)
 
         cache = consume nextCache
         lastTree = tree
@@ -509,6 +582,9 @@ public final class CalculatorSession {
         cache = nil
         lastTree = tree
         lastDiagnostics = []
+        evaluationCache.removeAll()
+        evaluationMetadata = SyntaxMetadataStore<CalculatorLanguage>()
+        lastEvaluationStats = CalculatorEvaluationStats()
     }
 
     /// Constant-fold the current document one subtree replacement at a time.
@@ -542,6 +618,12 @@ public final class CalculatorSession {
             )
             let step = output.step
             foldCache = output.intoCache()
+            translateEvaluationCache(
+                from: currentTree,
+                to: step.newTree,
+                witness: step.witness,
+                replacementValue: candidate.literal.value
+            )
             currentTree = step.newTree
             steps.append(step)
         }
@@ -552,6 +634,8 @@ public final class CalculatorSession {
         cache = consume foldCache
         lastTree = currentTree
         lastDiagnostics = []
+        evaluationMetadata = SyntaxMetadataStore<CalculatorLanguage>()
+        lastEvaluationStats = CalculatorEvaluationStats()
         return FoldReport(
             steps: steps,
             finalTree: currentTree,
@@ -565,6 +649,64 @@ public final class CalculatorSession {
         incremental.counters
     }
 
+    public var evaluationStats: CalculatorEvaluationStats {
+        lastEvaluationStats
+    }
+
+    public func evaluate() throws -> CalculatorValue {
+        guard let tree = lastTree else {
+            throw CalculatorEvaluationError.invalidSyntax("no current document")
+        }
+        guard lastDiagnostics.isEmpty else {
+            throw CalculatorEvaluationError.invalidSyntax(
+                lastDiagnostics.map(formatDiagnostic).joined(separator: "\n")
+            )
+        }
+
+        evaluationMetadata = SyntaxMetadataStore<CalculatorLanguage>()
+        var evaluator = CalculatorEvaluator(
+            cache: evaluationCache,
+            metadata: evaluationMetadata
+        )
+        let value = try evaluator.evaluateTree(tree)
+        lastEvaluationStats = evaluator.stats
+        return value
+    }
+
+    public func cachedValues() -> [CalculatorCachedValue] {
+        guard let tree = lastTree else {
+            return []
+        }
+        let snapshot = evaluationCache.snapshot()
+        let metadata = evaluationMetadata
+        return tree.withRoot { root in
+            var values: [CalculatorCachedValue] = []
+            _ = root.visitPreorder { node in
+                let handle = node.makeHandle()
+                guard ExprSyntax(handle) != nil else {
+                    return .continue
+                }
+                let key = calculatorEvaluationCacheKey(for: handle.identity)
+                guard let value = snapshot[key] else {
+                    return .continue
+                }
+                values.append(CalculatorCachedValue(
+                    range: node.textRange,
+                    value: value,
+                    evaluationOrder: metadata.value(for: calculatorEvaluationOrderKey, on: handle),
+                    valueKind: metadata.value(for: calculatorEvaluationKindKey, on: handle)
+                ))
+                return .continue
+            }
+            return values.sorted {
+                if $0.range.start == $1.range.start {
+                    return $0.range.end < $1.range.end
+                }
+                return $0.range.start < $1.range.start
+            }
+        }
+    }
+
     /// Drop the carried cache and previous tree. The next `parse(_:)` call
     /// behaves like a fresh session. Note: `IncrementalParseSession` itself
     /// carries counters as well; calling `reset()` does NOT zero counters
@@ -575,6 +717,138 @@ public final class CalculatorSession {
         cache = nil
         lastTree = nil
         lastDiagnostics = []
+        evaluationCache.removeAll()
+        evaluationMetadata = SyntaxMetadataStore<CalculatorLanguage>()
+        lastEvaluationStats = CalculatorEvaluationStats()
+    }
+
+    private func makeParseWitness(
+        previousTree: SharedSyntaxTree<CalculatorLanguage>?,
+        newTree: SharedSyntaxTree<CalculatorLanguage>,
+        acceptedReuses: [CalculatorAcceptedReuse]
+    ) -> ParseWitness<CalculatorLanguage> {
+        for acceptedReuse in acceptedReuses {
+            guard let newPath = resolveAcceptedReuse(acceptedReuse, in: newTree) else {
+                continue
+            }
+            incremental.recordAcceptedReuse(
+                oldPath: acceptedReuse.oldPath,
+                newPath: newPath,
+                green: acceptedReuse.green
+            )
+        }
+
+        return ParseWitness(
+            oldRoot: previousTree?.rootGreen,
+            newRoot: newTree.rootGreen,
+            reusedSubtrees: incremental.consumeAcceptedReuses()
+        )
+    }
+
+    private func resolveAcceptedReuse(
+        _ acceptedReuse: CalculatorAcceptedReuse,
+        in tree: SharedSyntaxTree<CalculatorLanguage>
+    ) -> SyntaxNodePath? {
+        tree.withRoot { root in
+            var resolvedPath: SyntaxNodePath?
+            _ = root.visitPreorder { node in
+                guard resolvedPath == nil,
+                      node.textRange.start == acceptedReuse.newOffset,
+                      node.green({ green in green.identity }) == acceptedReuse.green.identity
+                else {
+                    return .continue
+                }
+                resolvedPath = node.childIndexPath()
+                return .stop
+            }
+            return resolvedPath
+        }
+    }
+
+    private func translateEvaluationCache(
+        from previousTree: SharedSyntaxTree<CalculatorLanguage>,
+        to newTree: SharedSyntaxTree<CalculatorLanguage>,
+        witness: ParseWitness<CalculatorLanguage>
+    ) {
+        guard !witness.reusedSubtrees.isEmpty else {
+            return
+        }
+        let snapshot = evaluationCache.snapshot()
+        guard !snapshot.isEmpty else {
+            return
+        }
+
+        previousTree.withRoot { oldRoot in
+            newTree.withRoot { newRoot in
+                for reuse in witness.reusedSubtrees {
+                    _ = oldRoot.withDescendant(atPath: reuse.oldPath) { oldReuseRoot in
+                        oldReuseRoot.forEachDescendant(includingSelf: true) { oldNode in
+                            let oldHandle = oldNode.makeHandle()
+                            let oldKey = calculatorEvaluationCacheKey(for: oldHandle.identity)
+                            guard let value = snapshot[oldKey] else {
+                                return
+                            }
+
+                            let fullOldPath = oldNode.childIndexPath()
+                            let relativePath = SyntaxNodePath(fullOldPath.dropFirst(reuse.oldPath.count))
+                            let newPath = reuse.newPath + relativePath
+                            _ = newRoot.withDescendant(atPath: newPath) { newNode in
+                                let newKey = calculatorEvaluationCacheKey(for: newNode.identity)
+                                evaluationCache.set(value, for: newKey)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func translateEvaluationCache(
+        from previousTree: SharedSyntaxTree<CalculatorLanguage>,
+        to newTree: SharedSyntaxTree<CalculatorLanguage>,
+        witness: ReplacementWitness<CalculatorLanguage>,
+        replacementValue: CalculatorValue
+    ) {
+        let snapshot = evaluationCache.snapshot()
+        previousTree.withRoot { oldRoot in
+            newTree.withRoot { newRoot in
+                if !snapshot.isEmpty {
+                    oldRoot.forEachDescendant(includingSelf: true) { oldNode in
+                        let oldHandle = oldNode.makeHandle()
+                        guard ExprSyntax(oldHandle) != nil else {
+                            return
+                        }
+                        let oldKey = calculatorEvaluationCacheKey(for: oldHandle.identity)
+                        guard let value = snapshot[oldKey] else {
+                            return
+                        }
+
+                        let path = oldNode.childIndexPath()
+                        guard case .unchanged = witness.classify(path: path) else {
+                            return
+                        }
+                        _ = newRoot.withDescendant(atPath: path) { newNode in
+                            let newHandle = newNode.makeHandle()
+                            guard ExprSyntax(newHandle) != nil else {
+                                return
+                            }
+                            let newKey = calculatorEvaluationCacheKey(for: newHandle.identity)
+                            evaluationCache.set(value, for: newKey)
+                        }
+                    }
+                }
+
+                _ = newRoot.withDescendant(atPath: witness.replacedPath) { replacementNode in
+                    let replacementHandle = replacementNode.makeHandle()
+                    guard ExprSyntax(replacementHandle) != nil else {
+                        return
+                    }
+                    let replacementKey = calculatorEvaluationCacheKey(for: replacementHandle.identity)
+                    evaluationCache.set(replacementValue, for: replacementKey)
+                }
+            }
+        }
+        evaluationCache.removeValues(notMatching: newTree.treeID)
     }
 }
 
@@ -594,11 +868,13 @@ private struct FoldTrivia {
 }
 
 private struct FoldLiteral {
+    var value: CalculatorValue
     var expressionKind: CalculatorKind
     var tokenKind: CalculatorKind
     var text: String
 
     init?(_ value: CalculatorValue) {
+        self.value = value
         switch value {
         case .integer(let value):
             expressionKind = .integerExpr
@@ -810,6 +1086,20 @@ private extension ExprSyntax {
     }
 }
 
+private let calculatorEvaluationNamespace = "com.cambium.examples.calculator.eval"
+private let calculatorEvaluationOrderKey = SyntaxDataKey<Int>(
+    "com.cambium.examples.calculator.eval.order"
+)
+private let calculatorEvaluationKindKey = SyntaxDataKey<CalculatorValueKind>(
+    "com.cambium.examples.calculator.eval.value-kind"
+)
+
+private func calculatorEvaluationCacheKey(
+    for identity: SyntaxNodeIdentity
+) -> AnalysisCacheKey<CalculatorLanguage> {
+    AnalysisCacheKey(identity: identity, namespace: calculatorEvaluationNamespace)
+}
+
 private func foldDisplayName(for kind: CalculatorKind) -> String {
     switch kind {
     case .integerExpr:
@@ -830,12 +1120,8 @@ private func foldDisplayName(for kind: CalculatorKind) -> String {
 }
 
 public func evaluateCalculatorTree(_ tree: SharedSyntaxTree<CalculatorLanguage>) throws -> CalculatorValue {
-    try tree.withRoot { root in
-        guard let root = RootSyntax(root.makeHandle()) else {
-            throw CalculatorEvaluationError.unsupportedSyntax(CalculatorLanguage.name(for: root.kind), root.textRange)
-        }
-        return try evaluateRoot(root)
-    }
+    var evaluator = CalculatorEvaluator()
+    return try evaluator.evaluateTree(tree)
 }
 
 public func calculatorDebugTree(_ tree: SharedSyntaxTree<CalculatorLanguage>) -> String {
@@ -925,130 +1211,191 @@ private extension ExprSyntax {
     }
 }
 
-private func evaluateRoot(_ root: RootSyntax) throws -> CalculatorValue {
-    if let invalidRange = root.firstInvalidChildRange() {
-        throw CalculatorEvaluationError.invalidSyntax("parse error node at \(format(invalidRange))")
-    }
-
-    let expressions = root.expressions
-    guard expressions.count == 1 else {
-        let message = expressions.isEmpty ? "expected expression" : "multiple root expressions"
-        throw CalculatorEvaluationError.invalidSyntax("\(message) at \(format(root.range))")
-    }
-    return try evaluate(expressions[0])
-}
-
 private func evaluate(_ expression: ExprSyntax) throws -> CalculatorValue {
-    switch expression {
-    case .integer(let expression):
-        return try evaluateInteger(expression)
-    case .real(let expression):
-        return try evaluateReal(expression)
-    case .unary(let expression):
-        return try evaluateUnary(expression)
-    case .binary(let expression):
-        return try evaluateBinary(expression)
-    case .group(let expression):
-        return try evaluateGroup(expression)
-    case .roundCall(let expression):
-        return try evaluateRoundCall(expression)
-    }
+    var evaluator = CalculatorEvaluator()
+    return try evaluator.evaluate(expression)
 }
 
-private func evaluateInteger(_ expression: IntegerExprSyntax) throws -> CalculatorValue {
-    guard let token = expression.literal else {
-        throw CalculatorEvaluationError.unsupportedSyntax("missing integer literal", expression.range)
-    }
-    guard let value = Int64(token.text) else {
-        throw CalculatorEvaluationError.integerLiteralOutOfRange(token.text, token.range)
-    }
-    return .integer(value)
-}
+private struct CalculatorEvaluator {
+    private let cache: ExternalAnalysisCache<CalculatorLanguage, CalculatorValue>?
+    private let metadata: SyntaxMetadataStore<CalculatorLanguage>?
+    private var evaluationOrder = 0
+    private(set) var stats = CalculatorEvaluationStats()
 
-private func evaluateReal(_ expression: RealExprSyntax) throws -> CalculatorValue {
-    guard let token = expression.literal else {
-        throw CalculatorEvaluationError.unsupportedSyntax("missing real literal", expression.range)
-    }
-    guard let value = Double(token.text), value.isFinite else {
-        throw CalculatorEvaluationError.realLiteralOutOfRange(token.text, token.range)
-    }
-    return .real(value)
-}
-
-private func evaluateUnary(_ expression: UnaryExprSyntax) throws -> CalculatorValue {
-    guard let operand = expression.operand else {
-        throw CalculatorEvaluationError.unsupportedSyntax("unary expression is missing an operand", expression.range)
+    init(
+        cache: ExternalAnalysisCache<CalculatorLanguage, CalculatorValue>? = nil,
+        metadata: SyntaxMetadataStore<CalculatorLanguage>? = nil
+    ) {
+        self.cache = cache
+        self.metadata = metadata
     }
 
-    switch try evaluate(operand) {
-    case .integer(let value):
-        let result = Int64(0).subtractingReportingOverflow(value)
-        guard !result.overflow else {
-            throw CalculatorEvaluationError.overflow(expression.range)
+    mutating func evaluateTree(
+        _ tree: SharedSyntaxTree<CalculatorLanguage>
+    ) throws -> CalculatorValue {
+        try tree.withRoot { root in
+            guard let root = RootSyntax(root.makeHandle()) else {
+                throw CalculatorEvaluationError.unsupportedSyntax(
+                    CalculatorLanguage.name(for: root.kind),
+                    root.textRange
+                )
+            }
+            return try evaluateRoot(root)
         }
-        return .integer(result.partialValue)
-    case .real(let value):
-        let result = -value
-        guard result.isFinite else {
-            throw CalculatorEvaluationError.nonFiniteResult(expression.range)
+    }
+
+    private mutating func evaluateRoot(_ root: RootSyntax) throws -> CalculatorValue {
+        if let invalidRange = root.firstInvalidChildRange() {
+            throw CalculatorEvaluationError.invalidSyntax("parse error node at \(format(invalidRange))")
         }
-        return .real(result)
-    }
-}
 
-private func evaluateBinary(_ expression: BinaryExprSyntax) throws -> CalculatorValue {
-    guard let lhs = expression.lhs else {
-        throw CalculatorEvaluationError.unsupportedSyntax("binary expression is missing a left operand", expression.range)
-    }
-    guard let operatorToken = expression.operatorToken else {
-        throw CalculatorEvaluationError.unsupportedSyntax("binary expression is missing an operator", expression.range)
-    }
-    guard let rhs = expression.rhs else {
-        throw CalculatorEvaluationError.unsupportedSyntax("binary expression is missing a right operand", expression.range)
+        let expressions = root.expressions
+        guard expressions.count == 1 else {
+            let message = expressions.isEmpty ? "expected expression" : "multiple root expressions"
+            throw CalculatorEvaluationError.invalidSyntax("\(message) at \(format(root.range))")
+        }
+        return try evaluate(expressions[0])
     }
 
-    let leftValue = try evaluate(lhs)
-    let rightValue = try evaluate(rhs)
+    mutating func evaluate(_ expression: ExprSyntax) throws -> CalculatorValue {
+        stats.evalNodes += 1
+        let handle = expression.syntax
+        let key = calculatorEvaluationCacheKey(for: handle.identity)
 
-    switch (leftValue, rightValue) {
-    case (.integer(let left), .integer(let right)):
-        return try evaluateIntegerBinary(
-            left,
-            right,
-            operatorKind: operatorToken.operatorKind,
-            operatorRange: operatorToken.range
-        )
-    default:
-        return try evaluateRealBinary(
-            leftValue.realValue,
-            rightValue.realValue,
-            operatorKind: operatorToken.operatorKind,
-            operatorRange: operatorToken.range
-        )
+        if let cached = cache?.value(for: key) {
+            stats.evalHits += 1
+            recordMetadata(cached, on: handle)
+            return cached
+        }
+
+        let value: CalculatorValue
+        switch expression {
+        case .integer(let expression):
+            value = try evaluateInteger(expression)
+        case .real(let expression):
+            value = try evaluateReal(expression)
+        case .unary(let expression):
+            value = try evaluateUnary(expression)
+        case .binary(let expression):
+            value = try evaluateBinary(expression)
+        case .group(let expression):
+            value = try evaluateGroup(expression)
+        case .roundCall(let expression):
+            value = try evaluateRoundCall(expression)
+        }
+
+        cache?.set(value, for: key)
+        recordMetadata(value, on: handle)
+        return value
     }
-}
 
-private func evaluateGroup(_ expression: GroupExprSyntax) throws -> CalculatorValue {
-    guard let nestedExpression = expression.expression else {
-        throw CalculatorEvaluationError.unsupportedSyntax("group expression is missing an expression", expression.range)
+    private mutating func recordMetadata(
+        _ value: CalculatorValue,
+        on handle: SyntaxNodeHandle<CalculatorLanguage>
+    ) {
+        guard let metadata else {
+            return
+        }
+        evaluationOrder += 1
+        metadata.set(evaluationOrder, for: calculatorEvaluationOrderKey, on: handle)
+        metadata.set(value.kind, for: calculatorEvaluationKindKey, on: handle)
     }
-    return try evaluate(nestedExpression)
-}
 
-private func evaluateRoundCall(_ expression: RoundCallExprSyntax) throws -> CalculatorValue {
-    guard let argument = expression.argument else {
-        throw CalculatorEvaluationError.unsupportedSyntax("round call is missing an argument", expression.range)
-    }
-
-    switch try evaluate(argument) {
-    case .integer(let value):
+    private func evaluateInteger(_ expression: IntegerExprSyntax) throws -> CalculatorValue {
+        guard let token = expression.literal else {
+            throw CalculatorEvaluationError.unsupportedSyntax("missing integer literal", expression.range)
+        }
+        guard let value = Int64(token.text) else {
+            throw CalculatorEvaluationError.integerLiteralOutOfRange(token.text, token.range)
+        }
         return .integer(value)
-    case .real(let value):
-        let rounded = value.rounded(.toNearestOrAwayFromZero)
-        guard rounded.isFinite, let integer = Int64(exactly: rounded) else {
-            throw CalculatorEvaluationError.roundedValueOutOfRange(rounded, expression.range)
+    }
+
+    private func evaluateReal(_ expression: RealExprSyntax) throws -> CalculatorValue {
+        guard let token = expression.literal else {
+            throw CalculatorEvaluationError.unsupportedSyntax("missing real literal", expression.range)
         }
-        return .integer(integer)
+        guard let value = Double(token.text), value.isFinite else {
+            throw CalculatorEvaluationError.realLiteralOutOfRange(token.text, token.range)
+        }
+        return .real(value)
+    }
+
+    private mutating func evaluateUnary(_ expression: UnaryExprSyntax) throws -> CalculatorValue {
+        guard let operand = expression.operand else {
+            throw CalculatorEvaluationError.unsupportedSyntax("unary expression is missing an operand", expression.range)
+        }
+
+        switch try evaluate(operand) {
+        case .integer(let value):
+            let result = Int64(0).subtractingReportingOverflow(value)
+            guard !result.overflow else {
+                throw CalculatorEvaluationError.overflow(expression.range)
+            }
+            return .integer(result.partialValue)
+        case .real(let value):
+            let result = -value
+            guard result.isFinite else {
+                throw CalculatorEvaluationError.nonFiniteResult(expression.range)
+            }
+            return .real(result)
+        }
+    }
+
+    private mutating func evaluateBinary(_ expression: BinaryExprSyntax) throws -> CalculatorValue {
+        guard let lhs = expression.lhs else {
+            throw CalculatorEvaluationError.unsupportedSyntax("binary expression is missing a left operand", expression.range)
+        }
+        guard let operatorToken = expression.operatorToken else {
+            throw CalculatorEvaluationError.unsupportedSyntax("binary expression is missing an operator", expression.range)
+        }
+        guard let rhs = expression.rhs else {
+            throw CalculatorEvaluationError.unsupportedSyntax("binary expression is missing a right operand", expression.range)
+        }
+
+        let leftValue = try evaluate(lhs)
+        let rightValue = try evaluate(rhs)
+
+        switch (leftValue, rightValue) {
+        case (.integer(let left), .integer(let right)):
+            return try evaluateIntegerBinary(
+                left,
+                right,
+                operatorKind: operatorToken.operatorKind,
+                operatorRange: operatorToken.range
+            )
+        default:
+            return try evaluateRealBinary(
+                leftValue.realValue,
+                rightValue.realValue,
+                operatorKind: operatorToken.operatorKind,
+                operatorRange: operatorToken.range
+            )
+        }
+    }
+
+    private mutating func evaluateGroup(_ expression: GroupExprSyntax) throws -> CalculatorValue {
+        guard let nestedExpression = expression.expression else {
+            throw CalculatorEvaluationError.unsupportedSyntax("group expression is missing an expression", expression.range)
+        }
+        return try evaluate(nestedExpression)
+    }
+
+    private mutating func evaluateRoundCall(_ expression: RoundCallExprSyntax) throws -> CalculatorValue {
+        guard let argument = expression.argument else {
+            throw CalculatorEvaluationError.unsupportedSyntax("round call is missing an argument", expression.range)
+        }
+
+        switch try evaluate(argument) {
+        case .integer(let value):
+            return .integer(value)
+        case .real(let value):
+            let rounded = value.rounded(.toNearestOrAwayFromZero)
+            guard rounded.isFinite, let integer = Int64(exactly: rounded) else {
+                throw CalculatorEvaluationError.roundedValueOutOfRange(rounded, expression.range)
+            }
+            return .integer(integer)
+        }
     }
 }
 
@@ -1115,6 +1462,15 @@ public func format(_ range: TextRange) -> String {
 }
 
 private extension CalculatorValue {
+    var kind: CalculatorValueKind {
+        switch self {
+        case .integer:
+            .integer
+        case .real:
+            .real
+        }
+    }
+
     var realValue: Double {
         switch self {
         case .integer(let value):

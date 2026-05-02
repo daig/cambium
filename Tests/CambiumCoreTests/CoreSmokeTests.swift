@@ -1151,6 +1151,46 @@ private enum ListSpec: TypedSyntaxNode {
     #expect(metadata.value(for: key, on: handle) == 42)
 }
 
+@Test func externalAnalysisCacheSupportsInspectionAndEviction() throws {
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.root)
+    try builder.missingNode(.list)
+    try builder.finishNode()
+
+    let firstTree = try builder.finish().snapshot.makeSyntaxTree()
+    let firstHandle = firstTree.withRoot { root in
+        root.withChildNode(at: 0) { child in
+            child.makeHandle()
+        }!
+    }
+    let firstKey = AnalysisCacheKey<TestLanguage>(
+        identity: firstHandle.identity,
+        namespace: "com.cambium.tests.score"
+    )
+
+    let cache = ExternalAnalysisCache<TestLanguage, Int>()
+    #expect(cache.isEmpty)
+    #expect(cache.count == 0)
+
+    cache.set(42, for: firstKey)
+    #expect(!cache.isEmpty)
+    #expect(cache.count == 1)
+    #expect(cache.snapshot()[firstKey] == 42)
+
+    var secondBuilder = GreenTreeBuilder<TestLanguage>()
+    secondBuilder.startNode(.root)
+    try secondBuilder.missingNode(.list)
+    try secondBuilder.finishNode()
+    let secondTree = try secondBuilder.finish().snapshot.makeSyntaxTree()
+
+    cache.removeValues(notMatching: secondTree.treeID)
+    #expect(cache.isEmpty)
+
+    cache.set(7, for: firstKey)
+    cache.removeAll()
+    #expect(cache.count == 0)
+}
+
 @Test func serializationRoundTripsFullTreeAndFreshTreeIdentity() throws {
     var builder = GreenTreeBuilder<TestLanguage>()
     builder.startNode(.root)

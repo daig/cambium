@@ -181,6 +181,16 @@ public final class ExternalAnalysisCache<Lang: SyntaxLanguage, Value: Sendable>:
     /// Construct an empty cache.
     public init() {}
 
+    /// The number of cached entries currently stored.
+    public var count: Int {
+        storage.withLock { $0.count }
+    }
+
+    /// Whether the cache currently stores no entries.
+    public var isEmpty: Bool {
+        storage.withLock { $0.isEmpty }
+    }
+
     /// Read the value for `key`, or `nil` when no entry exists.
     public func value(for key: AnalysisCacheKey<Lang>) -> Value? {
         storage.withLock { $0[key] }
@@ -189,6 +199,19 @@ public final class ExternalAnalysisCache<Lang: SyntaxLanguage, Value: Sendable>:
     /// Bind `value` to `key`, replacing any existing entry.
     public func set(_ value: Value, for key: AnalysisCacheKey<Lang>) {
         storage.withLock { $0[key] = value }
+    }
+
+    /// Return a point-in-time copy of the cache contents.
+    ///
+    /// This is primarily useful for diagnostics, debugging views, and
+    /// higher-level identity translation driven by edit or parse witnesses.
+    public func snapshot() -> [AnalysisCacheKey<Lang>: Value] {
+        storage.withLock { $0 }
+    }
+
+    /// Drop every cached entry.
+    public func removeAll(keepingCapacity keepCapacity: Bool = false) {
+        storage.withLock { $0.removeAll(keepingCapacity: keepCapacity) }
     }
 
     /// Drop every entry whose identity does **not** belong to `treeID`.

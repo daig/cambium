@@ -497,6 +497,37 @@ identity. Cambium does not maintain those mappings itself — it
 provides the structural primitive and lets you compose the policy
 appropriate for your editor.
 
+## Analysis sidecars
+
+CambiumAnalysis provides two per-node sidecar shapes. Use
+``CambiumAnalysis/SyntaxMetadataStore`` for multi-typed annotations during a
+single analysis pass, and ``CambiumAnalysis/ExternalAnalysisCache`` for one
+long-lived, single-typed memoization cache that can bulk-evict old tree
+versions.
+
+```swift
+let metadata = SyntaxMetadataStore<Calc>()
+let typeKey = SyntaxDataKey<String>("com.example.calc.value-kind")
+metadata.set("integer", for: typeKey, on: exprHandle)
+
+let values = ExternalAnalysisCache<Calc, Int64>()
+let key = AnalysisCacheKey(
+    identity: exprHandle.identity,
+    namespace: "com.example.calc.eval"
+)
+values.set(42, for: key)
+values.removeValues(notMatching: latestTree.treeID)
+```
+
+Both stores key nodes by ``CambiumCore/SyntaxNodeIdentity``. If you want cached
+values to survive an incremental reparse, consume ``CambiumIncremental/ParseWitness``
+records before evicting: translate entries whose old paths fall inside reused
+subtrees onto the corresponding new paths, then call
+``CambiumAnalysis/ExternalAnalysisCache/removeValues(notMatching:)``.
+
+`SyntaxDataKey` equality is based on its string name, not its `Value` type; use
+namespaced strings so unrelated passes do not accidentally share the same slot.
+
 ## AST Layer
 
 While Cambium is built for concrete syntax trees, applications often

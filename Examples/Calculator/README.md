@@ -32,7 +32,8 @@ REPL commands:
 - `:ast` toggles typed AST dumps.
 - `:fold` constant-folds the current document one replacement at a time and
   prints each `ReplacementWitness` classification demo.
-- `:counters` prints incremental reuse counters.
+- `:counters` prints incremental reuse counters and evaluator cache stats.
+- `:cached` prints cached evaluator values attached to current-tree nodes.
 - `:reset` drops the current session state.
 - `:help` prints commands.
 - `:q` or `:quit` exits.
@@ -58,3 +59,35 @@ error: expected ')' at 2..<2
 calc> :at 2
 single: rightParen 2..<2 ""
 ```
+
+## Analysis Sidecars
+
+`CalculatorSession` keeps an `ExternalAnalysisCache` of evaluated expression
+values, keyed by each expression node's `SyntaxNodeIdentity`. A fresh tree
+evaluates normally and fills the cache. On incremental reparse, the parser
+records direct subtree reuses, the session builds a `ParseWitness`, forwards
+cached entries for reused subtrees onto the new tree's identities, then evicts
+entries from old tree versions.
+
+The evaluator also uses a `SyntaxMetadataStore` during the most recent
+evaluation to annotate nodes with evaluation order and value kind. This is
+single-pass metadata; the long-lived values live in `ExternalAnalysisCache`.
+
+Try:
+
+```text
+calc> 1.5 + round(2)
+3.5
+calc> :edit 0..<3 2.5
+- 1.5 + round(2)
++ 2.5 + round(2)
+4.5
+calc> :counters
+queries=... hits=... reusedBytes=... evalNodes=3 evalHits=1
+calc> :cached
+...
+```
+
+The evaluator short-circuits cached parents, so a reused `round(2)` hit skips
+its literal child during the actual evaluation. `:cached` still shows translated
+descendant entries when they exist.

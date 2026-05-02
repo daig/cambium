@@ -6,6 +6,13 @@ import Cambium
 struct CalculatorBuildOutput: ~Copyable {
     var build: GreenBuildResult<CalculatorLanguage>
     var diagnostics: [Diagnostic<CalculatorLanguage>]
+    var acceptedReuses: [CalculatorAcceptedReuse]
+}
+
+struct CalculatorAcceptedReuse: Sendable {
+    var oldPath: SyntaxNodePath
+    var green: GreenNode<CalculatorLanguage>
+    var newOffset: TextSize
 }
 
 struct CalculatorParser: ~Copyable {
@@ -25,6 +32,7 @@ struct CalculatorParser: ~Copyable {
     private var currentIndex: Int
     private var builder: GreenTreeBuilder<CalculatorLanguage>
     private var diagnostics: [Diagnostic<CalculatorLanguage>]
+    private var acceptedReuses: [CalculatorAcceptedReuse]
 
     // Incremental-reuse state. We don't store a `ReuseOracle` directly because
     // it is `~Copyable`; instead we keep its inputs and construct a fresh
@@ -45,6 +53,7 @@ struct CalculatorParser: ~Copyable {
         self.currentIndex = 0
         self.builder = builder
         self.diagnostics = []
+        self.acceptedReuses = []
         self.previousTree = previousTree
         self.edits = edits
         self.incremental = incremental
@@ -95,7 +104,11 @@ struct CalculatorParser: ~Copyable {
 
     consuming func finishBuild() throws -> CalculatorBuildOutput {
         let build = try builder.finish()
-        return CalculatorBuildOutput(build: build, diagnostics: diagnostics)
+        return CalculatorBuildOutput(
+            build: build,
+            diagnostics: diagnostics,
+            acceptedReuses: acceptedReuses
+        )
     }
 
     private var current: LexedToken {
@@ -327,7 +340,12 @@ struct CalculatorParser: ~Copyable {
         )
 
         for kind in Self.reusableKinds {
-            if try attemptReuse(oracle: oracle, oldOffset: oldOffset, kind: kind) {
+            if try attemptReuse(
+                oracle: oracle,
+                oldOffset: oldOffset,
+                newOffset: newOffset,
+                kind: kind
+            ) {
                 return true
             }
         }
@@ -337,6 +355,7 @@ struct CalculatorParser: ~Copyable {
     private mutating func attemptReuse(
         oracle: borrowing ReuseOracle<CalculatorLanguage>,
         oldOffset: TextSize,
+        newOffset: TextSize,
         kind: CalculatorKind
     ) throws -> Bool {
         var spliced = false
@@ -352,9 +371,9 @@ struct CalculatorParser: ~Copyable {
             guard let tokenCount = tokenCountMatching(text: cursor.makeString()) else {
                 return
             }
-            try builder.reuseSubtree(cursor)
+            let outcome = try builder.reuseSubtree(cursor)
             skipTokens(count: tokenCount)
-            recordAcceptedReuse(cursor: cursor, newOffset: cursor.textRange.start)
+            recordAcceptedReuse(cursor: cursor, outcome: outcome, newOffset: newOffset)
             spliced = true
         }
         return spliced
@@ -362,14 +381,19 @@ struct CalculatorParser: ~Copyable {
 
     private mutating func recordAcceptedReuse(
         cursor: borrowing SyntaxNodeCursor<CalculatorLanguage>,
+        outcome: SubtreeReuseOutcome,
         newOffset: TextSize
     ) {
-        // Currently only counters are exercised; full ParseWitness construction
-        // (recordAcceptedReuse with old/new paths) is deferred until we wire
-        // up downstream identity tracking. Leaving this hook here so the
-        // future change has a single touchpoint.
-        _ = cursor
-        _ = newOffset
+        guard outcome == .direct else {
+            return
+        }
+        let oldPath = cursor.childIndexPath()
+        let green = cursor.green { $0 }
+        acceptedReuses.append(CalculatorAcceptedReuse(
+            oldPath: oldPath,
+            green: green,
+            newOffset: newOffset
+        ))
     }
 
     private static func subtreeContainsSentinels(
