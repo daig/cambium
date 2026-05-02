@@ -122,6 +122,10 @@ modules directly.
 
 - <doc:GettingStarted>
 
+### Sample Code
+
+- <doc:CalculatorExample>
+
 ### Defining a language
 
 - ``CambiumCore/RawSyntaxKind``
