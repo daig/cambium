@@ -78,6 +78,14 @@ struct CalculatorREPL {
             case ":cached":
                 printCachedValues(session.cachedValues())
                 continue
+            case ":hash":
+                if let result = lastResult {
+                    let hash = result.sourceFNV1a()
+                    print(String(format: "0x%016llx", hash))
+                } else {
+                    print("(no document)")
+                }
+                continue
             case ":reset":
                 session = CalculatorSession()
                 document = ""
@@ -189,6 +197,75 @@ struct CalculatorREPL {
                 continue
             }
 
+            if trimmed == ":contains" {
+                print("error: usage is :contains <text>")
+                continue
+            }
+
+            if trimmed.hasPrefix(":contains ") {
+                let needle = String(trimmed.dropFirst(":contains ".count))
+                guard !needle.isEmpty else {
+                    print("error: usage is :contains <text>")
+                    continue
+                }
+                guard let result = lastResult else {
+                    print("error: no document")
+                    continue
+                }
+                print(result.sourceContains(needle) ? "yes" : "no")
+                continue
+            }
+
+            if trimmed == ":find" {
+                print("error: usage is :find <text>")
+                continue
+            }
+
+            if trimmed.hasPrefix(":find ") {
+                let needle = String(trimmed.dropFirst(":find ".count))
+                guard !needle.isEmpty else {
+                    print("error: usage is :find <text>")
+                    continue
+                }
+                guard let result = lastResult else {
+                    print("error: no document")
+                    continue
+                }
+                if let range = result.sourceFirstRange(of: needle) {
+                    print(format(range))
+                } else {
+                    print("not found")
+                }
+                continue
+            }
+
+            if trimmed == ":slice" {
+                print("error: usage is :slice <start>..<end>")
+                continue
+            }
+
+            if trimmed.hasPrefix(":slice ") {
+                let body = String(trimmed.dropFirst(":slice ".count))
+                guard let parsed = parseByteRange(body) else {
+                    print("error: usage is :slice <start>..<end>")
+                    continue
+                }
+                guard let result = lastResult else {
+                    print("error: no document")
+                    continue
+                }
+                let range = TextRange(
+                    start: TextSize(UInt32(parsed.start)),
+                    end: TextSize(UInt32(parsed.end))
+                )
+                if let slice = result.sourceSlice(range) {
+                    print(slice)
+                } else {
+                    print("error: slice range out of bounds for current document")
+                }
+                continue
+            }
+
             if trimmed.hasPrefix(":edit ") {
                 let body = String(trimmed.dropFirst(":edit ".count))
                 guard let parsed = parseEditCommand(body) else {
@@ -243,6 +320,10 @@ struct CalculatorREPL {
           :edit <start>..<end> <text> apply a byte-range edit and reparse
           :at <offset>                show token ownership at a byte offset
           :cover <start>..<end>       show smallest element covering a byte range
+          :find <text>                find first byte-range matching needle
+          :contains <text>            check whether the document contains needle
+          :slice <start>..<end>       print bytes in the given byte range
+          :hash                       FNV-1a hash of document bytes (streamed)
           :nodes                      list expression node handles
           :tokens [<start>..<end>]    list token handles, optionally in a byte range
           :show                       show current document and re-evaluate
