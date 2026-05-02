@@ -110,30 +110,54 @@ internal struct FoldTrivia {
 /// Returns `nil` for values whose canonical text is not a plain decimal
 /// literal (NaN, infinity, scientific notation), so the fold is skipped
 /// rather than producing an invalid replacement subtree.
+///
+/// Negative values are represented as a separate leading `.minus` token
+/// in the spliced subtree (matching how the parser builds signed
+/// literals), with `digitsText` carrying the digits-only token text
+/// that the language's `.number` / `.realNumber` kinds expect.
 internal struct FoldLiteral {
     var value: CalculatorValue
     var expressionKind: CalculatorKind
     var tokenKind: CalculatorKind
-    var text: String
+    var digitsText: String
+    var needsLeadingMinus: Bool
+
+    var displayText: String {
+        needsLeadingMinus ? "-\(digitsText)" : digitsText
+    }
 
     init?(_ value: CalculatorValue) {
         self.value = value
         switch value {
         case .integer(let value):
+            // Int64.min has |v| > Int64.max — its digits string would
+            // overflow `parseInt64` on re-read, so we couldn't produce a
+            // self-consistent replacement. Skip the fold instead.
+            // (Unreachable through valid calculator source today.)
+            guard value != .min else {
+                return nil
+            }
             expressionKind = .integerExpr
             tokenKind = .number
-            text = String(value)
+            digitsText = String(value.magnitude)
+            needsLeadingMinus = value < 0
         case .real(let value):
             guard value.isFinite else {
                 return nil
             }
-            let text = String(value)
-            guard Self.isPlainDecimal(text) else {
+            let canonical = String(value)
+            guard Self.isPlainDecimal(canonical) else {
                 return nil
             }
             expressionKind = .realExpr
             tokenKind = .realNumber
-            self.text = text
+            if canonical.hasPrefix("-") {
+                digitsText = String(canonical.dropFirst())
+                needsLeadingMinus = true
+            } else {
+                digitsText = canonical
+                needsLeadingMinus = false
+            }
         }
     }
 
@@ -162,23 +186,23 @@ internal struct FoldLiteral {
     }
 }
 
-/// Bundles a `FoldStep` with the `~Copyable` cache the next iteration
+/// Bundles a `FoldStep` with the `~Copyable` context the next iteration
 /// will consume. Swift tuples can't yet hold `~Copyable` elements, so
 /// this struct serves the same role.
 internal struct FoldApplyOutput: ~Copyable {
     var step: FoldStep
-    private var cache: GreenNodeCache<CalculatorLanguage>
+    private var context: GreenTreeContext<CalculatorLanguage>
 
     init(
         step: FoldStep,
-        cache: consuming GreenNodeCache<CalculatorLanguage>
+        context: consuming GreenTreeContext<CalculatorLanguage>
     ) {
         self.step = step
-        self.cache = cache
+        self.context = context
     }
 
-    consuming func intoCache() -> GreenNodeCache<CalculatorLanguage> {
-        cache
+    consuming func intoContext() -> GreenTreeContext<CalculatorLanguage> {
+        context
     }
 }
 
@@ -219,19 +243,22 @@ internal func firstFoldCandidate(
     }
 }
 
-/// Build the replacement subtree, splice it in via `replacing(_:with:cache:)`,
-/// and return the resulting step and forwarded cache.
+/// Build the replacement subtree, splice it in via `replacing(_:with:context:)`,
+/// and return the resulting step and forwarded context.
 internal func applyFold(
     _ candidate: FoldCandidate,
     in tree: SharedSyntaxTree<CalculatorLanguage>,
-    cache: consuming GreenNodeCache<CalculatorLanguage>
+    context: consuming GreenTreeContext<CalculatorLanguage>
 ) throws -> FoldApplyOutput {
-    var builder = GreenTreeBuilder<CalculatorLanguage>(cache: consume cache)
+    var builder = GreenTreeBuilder<CalculatorLanguage>(context: consume context)
     builder.startNode(candidate.literal.expressionKind)
     for trivia in candidate.leadingTrivia {
         try builder.appendTrivia(trivia)
     }
-    try builder.token(candidate.literal.tokenKind, text: candidate.literal.text)
+    if candidate.literal.needsLeadingMinus {
+        try builder.staticToken(.minus)
+    }
+    try builder.token(candidate.literal.tokenKind, text: candidate.literal.digitsText)
     for trivia in candidate.trailingTrivia {
         try builder.appendTrivia(trivia)
     }
@@ -240,13 +267,13 @@ internal func applyFold(
     let build = try builder.finish()
     let replacement = ResolvedGreenNode(
         root: build.root,
-        resolver: build.tokenText
+        resolver: build.resolver
     )
-    var replacementCache = build.intoCache()
+    var replacementContext = build.intoContext()
     let result = try tree.replacing(
         candidate.handle,
         with: replacement,
-        cache: &replacementCache
+        context: &replacementContext
     )
     let witness = result.witness
     let newTree = result.intoTree().intoShared()
@@ -254,12 +281,12 @@ internal func applyFold(
         oldKind: candidate.oldKind,
         newKind: candidate.literal.expressionKind,
         oldText: candidate.oldText,
-        newText: candidate.literal.text,
+        newText: candidate.literal.displayText,
         replacedPath: candidate.path,
         witness: witness,
         newTree: newTree
     )
-    return FoldApplyOutput(step: step, cache: consume replacementCache)
+    return FoldApplyOutput(step: step, context: consume replacementContext)
 }
 
 // MARK: - Fold predicates

@@ -576,7 +576,7 @@ private struct GreenSnapshotDecodedTreeBuilder<Lang: SyntaxLanguage> {
 
         return GreenTreeSnapshot(
             root: root,
-            tokenText: TokenTextSnapshot(interned: internedTexts, large: largeTexts)
+            resolver: TokenTextSnapshot(interned: internedTexts, large: largeTexts)
         )
     }
 
@@ -857,7 +857,7 @@ public extension SyntaxNodeCursor {
 public extension GreenTreeSnapshot {
     /// Serialize this snapshot to a Cambium green-snapshot byte sequence.
     func serializeGreenSnapshot() throws -> [UInt8] {
-        try encodeGreenSnapshot(root: root, resolver: tokenText)
+        try encodeGreenSnapshot(root: root, resolver: resolver)
     }
 }
 

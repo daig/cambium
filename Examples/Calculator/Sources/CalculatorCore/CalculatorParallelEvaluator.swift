@@ -216,7 +216,7 @@ private func evaluateIntegerLiteral(_ expression: IntegerExprSyntax) throws -> C
     guard let value = parsed else {
         throw CalculatorEvaluationError.integerLiteralOutOfRange(token.text, token.range)
     }
-    return .integer(value)
+    return .integer(expression.minusSign != nil ? -value : value)
 }
 
 private func evaluateRealLiteral(_ expression: RealExprSyntax) throws -> CalculatorValue {
@@ -231,7 +231,7 @@ private func evaluateRealLiteral(_ expression: RealExprSyntax) throws -> Calcula
     guard let value = Double(text), value.isFinite else {
         throw CalculatorEvaluationError.realLiteralOutOfRange(text, token.range)
     }
-    return .real(value)
+    return .real(expression.minusSign != nil ? -value : value)
 }
 
 private func evaluateUnaryInParallel(

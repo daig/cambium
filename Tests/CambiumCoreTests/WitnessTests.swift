@@ -23,8 +23,8 @@ import Testing
     try replacementBuilder.finishNode()
     let replacement = try replacementBuilder.finish().snapshot
 
-    var cache = GreenNodeCache<TestLanguage>()
-    let result = try shared.replacing(handleToChild1, with: replacement, cache: &cache)
+    var context = GreenTreeContext<TestLanguage>()
+    let result = try shared.replacing(handleToChild1, with: replacement, context: &context)
     let witness = result.witness
     let newTree = result.intoTree()
 
@@ -52,8 +52,8 @@ import Testing
     try replacementBuilder.finishNode()
     let replacement = try replacementBuilder.finish().snapshot
 
-    var cache = GreenNodeCache<TestLanguage>()
-    let result = try shared.replacing(handleToChild1, with: replacement, cache: &cache)
+    var context = GreenTreeContext<TestLanguage>()
+    let result = try shared.replacing(handleToChild1, with: replacement, context: &context)
     let witness = result.witness
 
     // Strict prefix → ancestor
@@ -89,8 +89,8 @@ import Testing
     try replacementBuilder.finishNode()
     let replacement = try replacementBuilder.finish().snapshot
 
-    var cache = GreenNodeCache<TestLanguage>()
-    let result = try shared.replacing(rootHandle, with: replacement, cache: &cache)
+    var context = GreenTreeContext<TestLanguage>()
+    let result = try shared.replacing(rootHandle, with: replacement, context: &context)
     let witness = result.witness
 
     #expect(witness.replacedPath == [])
@@ -117,8 +117,8 @@ import Testing
         cursor.resolvedGreenNode()
     }
 
-    var cache = GreenNodeCache<TestLanguage>()
-    let result = try shared.replacing(handleToChild1, with: oldChild1Resolved, cache: &cache)
+    var context = GreenTreeContext<TestLanguage>()
+    let result = try shared.replacing(handleToChild1, with: oldChild1Resolved, context: &context)
     let witness = result.witness
     let newTree = result.intoTree()
 
@@ -161,8 +161,8 @@ import Testing
     let replacementResult = try replacementBuilder.finish()
     let replacement = replacementResult.root
 
-    var cache = GreenNodeCache<TestLanguage>()
-    let result = try shared.replacing(handleToChild1, with: replacementResult, cache: &cache)
+    var context = GreenTreeContext<TestLanguage>()
+    let result = try shared.replacing(handleToChild1, with: replacementResult, context: &context)
     let witness = result.witness
     let newTree = result.intoTree()
 
@@ -181,11 +181,11 @@ import Testing
     let shared = try targetBuilder.finish().snapshot.makeSyntaxTree().share()
 
     let replacement = try makeRootSnapshot("foreign")
-    var cache = GreenNodeCache<TestLanguage>()
+    var context = GreenTreeContext<TestLanguage>()
     let result = try shared.replacing(
         shared.rootHandle(),
-        with: ResolvedGreenNode(root: replacement.root, resolver: replacement.tokenText),
-        cache: &cache
+        with: ResolvedGreenNode(root: replacement.root, resolver: replacement.resolver),
+        context: &context
     )
     let newTree = result.intoTree()
 
@@ -204,8 +204,8 @@ import Testing
         root.withChildNode(at: 1) { $0.makeHandle() }!
     }
 
-    var cache = GreenNodeCache<TestLanguage>()
-    let result = try shared.replacing(handleToChild1, with: replacement, cache: &cache)
+    var context = GreenTreeContext<TestLanguage>()
+    let result = try shared.replacing(handleToChild1, with: replacement, context: &context)
     let witness = result.witness
     let newTree = result.intoTree()
 
@@ -224,8 +224,8 @@ import Testing
         cursor.resolvedGreenNode()
     }
 
-    var cache = GreenNodeCache<TestLanguage>()
-    let result = try shared.replacing(handleToChild1, with: replacement, cache: &cache)
+    var context = GreenTreeContext<TestLanguage>()
+    let result = try shared.replacing(handleToChild1, with: replacement, context: &context)
     let witness = result.witness
     let newTree = result.intoTree()
 
@@ -251,20 +251,20 @@ import Testing
     let buildResult = try builder.finish()
     let shared = buildResult.snapshot.makeSyntaxTree().share()
     let originalNamespace = shared.resolver.tokenKeyNamespace
-    var cache = buildResult.intoCache()
+    var context = buildResult.intoContext()
     let handleToChild1 = shared.withRoot { root in
         root.withChildNode(at: 1) { $0.makeHandle() }!
     }
     let replacement = try makeListSnapshot("cache-remapped")
 
-    let result = try shared.replacing(handleToChild1, with: replacement, cache: &cache)
+    let result = try shared.replacing(handleToChild1, with: replacement, context: &context)
     let newTree = result.intoTree()
 
     #expect(newTree.withRoot { $0.makeString() } == "keepcache-remapped")
     #expect(originalNamespace != nil)
     #expect(newTree.resolver.tokenKeyNamespace === originalNamespace)
 
-    var reuseBuilder = GreenTreeBuilder<TestLanguage>(cache: cache)
+    var reuseBuilder = GreenTreeBuilder<TestLanguage>(context: consume context)
     reuseBuilder.startNode(.root)
     let outcome = try newTree.withRoot { root in
         try reuseBuilder.reuseSubtree(root)
@@ -278,8 +278,8 @@ import Testing
         root.withChildNode(at: 1) { $0.makeHandle() }!
     }
 
-    var cache = GreenNodeCache<TestLanguage>()
-    let result = try shared.replacing(handleToChild1, with: try makeListSnapshot("new"), cache: &cache)
+    var context = GreenTreeContext<TestLanguage>()
+    let result = try shared.replacing(handleToChild1, with: try makeListSnapshot("new"), context: &context)
     let newTree = result.intoTree()
 
     #expect(newTree.withRoot { $0.makeString() } == "keepnew")
@@ -291,8 +291,8 @@ import Testing
         root.withChildNode(at: 1) { $0.makeHandle() }!
     }
 
-    var cache = GreenNodeCache<TestLanguage>()
-    let firstResult = try shared.replacing(handleToChild1, with: try makeListSnapshot("one"), cache: &cache)
+    var context = GreenTreeContext<TestLanguage>()
+    let firstResult = try shared.replacing(handleToChild1, with: try makeListSnapshot("one"), context: &context)
     let firstKey = firstInternedTokenKey(in: firstResult.witness.newSubtree)
     let firstTree = firstResult.intoTree()
     let firstShared = firstTree.share()
@@ -300,7 +300,7 @@ import Testing
         root.withChildNode(at: 0) { $0.makeHandle() }!
     }
 
-    let secondResult = try firstShared.replacing(handleToChild0, with: try makeListSnapshot("two"), cache: &cache)
+    let secondResult = try firstShared.replacing(handleToChild0, with: try makeListSnapshot("two"), context: &context)
     let secondKey = firstInternedTokenKey(in: secondResult.witness.newSubtree)
     let secondTree = secondResult.intoTree()
 
@@ -318,11 +318,11 @@ import Testing
         root.withChildNode(at: 1) { $0.makeHandle() }!
     }
 
-    var cache = GreenNodeCache<TestLanguage>()
-    let firstResult = try shared.replacing(handleToChild1, with: try makeListSnapshot("one"), cache: &cache)
+    var context = GreenTreeContext<TestLanguage>()
+    let firstResult = try shared.replacing(handleToChild1, with: try makeListSnapshot("one"), context: &context)
     let firstIdentity = firstResult.witness.newSubtree.identity
     let firstTree = firstResult.intoTree()
-    let secondResult = try shared.replacing(handleToChild1, with: try makeListSnapshot("two"), cache: &cache)
+    let secondResult = try shared.replacing(handleToChild1, with: try makeListSnapshot("two"), context: &context)
     let secondIdentity = secondResult.witness.newSubtree.identity
     let secondTree = secondResult.intoTree()
 
@@ -344,16 +344,16 @@ import Testing
     try builder.finishNode()
     let buildResult = try builder.finish()
     let shared = buildResult.snapshot.makeSyntaxTree().share()
-    var cache = buildResult.intoCache()
+    var context = buildResult.intoContext()
 
-    var growBuilder = GreenTreeBuilder<TestLanguage>(cache: cache)
+    var growBuilder = GreenTreeBuilder<TestLanguage>(context: consume context)
     growBuilder.startNode(.root)
     try growBuilder.token(.identifier, text: "extra")
     try growBuilder.finishNode()
-    cache = try growBuilder.finish().intoCache()
+    context = try growBuilder.finish().intoContext()
 
     let replacement = try makeRootSnapshot("extra")
-    let result = try shared.replacing(shared.rootHandle(), with: replacement, cache: &cache)
+    let result = try shared.replacing(shared.rootHandle(), with: replacement, context: &context)
     let newTree = result.intoTree()
 
     #expect(newTree.withRoot { $0.makeString() } == "extra")
@@ -376,25 +376,25 @@ import Testing
     try builder.finishNode()
     try builder.finishNode()
     let buildResult = try builder.finish()
-    let originalNamespace = buildResult.tokenText.tokenKeyNamespace
+    let originalNamespace = buildResult.resolver.tokenKeyNamespace
     let shared = buildResult.snapshot.makeSyntaxTree().share()
-    var cache = buildResult.intoCache()
+    var context = buildResult.intoContext()
 
-    var replacementBuilder = GreenTreeBuilder<TestLanguage>(cache: cache)
+    var replacementBuilder = GreenTreeBuilder<TestLanguage>(context: consume context)
     replacementBuilder.startNode(.list)
     try replacementBuilder.token(.identifier, text: "newkey")
     try replacementBuilder.finishNode()
     let replacementResult = try replacementBuilder.finish()
     let replacementResolved = ResolvedGreenNode(
         root: replacementResult.root,
-        resolver: replacementResult.tokenText
+        resolver: replacementResult.resolver
     )
-    cache = replacementResult.intoCache()
+    context = replacementResult.intoContext()
 
     let handleToChild1 = shared.withRoot { root in
         root.withChildNode(at: 1) { $0.makeHandle() }!
     }
-    let result = try shared.replacing(handleToChild1, with: replacementResolved, cache: &cache)
+    let result = try shared.replacing(handleToChild1, with: replacementResolved, context: &context)
     let newTree = result.intoTree()
 
     #expect(newTree.withRoot { $0.makeString() } == "keepnewkey")

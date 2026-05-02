@@ -1091,8 +1091,8 @@ private func describeElementWalkEvent(_ event: borrowing SyntaxElementWalkEvent<
     try replacementBuilder.finishNode()
     let replacement = try replacementBuilder.finish()
 
-    var cache = GreenNodeCache<TestLanguage>()
-    let result = try shared.replacing(listHandle, with: replacement, cache: &cache)
+    var context = GreenTreeContext<TestLanguage>()
+    let result = try shared.replacing(listHandle, with: replacement, context: &context)
     let witness = result.witness
     let newTree = result.intoTree()
 
@@ -1266,8 +1266,8 @@ private enum ListSpec: TypedSyntaxNode {
     try replacementBuilder.finishNode()
     let replacement = try replacementBuilder.finish()
 
-    var cache = GreenNodeCache<TestLanguage>()
-    let result = try shared.replacing(listHandle, with: replacement, cache: &cache)
+    var context = GreenTreeContext<TestLanguage>()
+    let result = try shared.replacing(listHandle, with: replacement, context: &context)
     let replaced = result.intoTree()
     let bytes = try replaced.serializeGreenSnapshot()
     let decoded = try GreenSnapshotDecoder.decodeTree(bytes, as: TestLanguage.self)

@@ -210,10 +210,23 @@ struct CalculatorParser: ~Copyable {
             try builder.finishNode()
 
         case .minus:
-            _ = try advance()
-            try builder.startNode(at: checkpoint, .unaryExpr)
-            try parseExpression(minPrecedence: Self.prefixPrecedence)
-            try builder.finishNode()
+            // A `-` immediately followed (no trivia) by a number/realNumber
+            // token forms a single signed literal — no UnaryExpr wrapper.
+            // Anything else (whitespace, `(`, `round`, another `-`, eof)
+            // routes to unary negation.
+            let next = currentIndex + 1 < tokens.count ? tokens[currentIndex + 1].kind : nil
+            if next == .number || next == .realNumber {
+                _ = try advance()  // consume minus
+                let isReal = current.kind == .realNumber
+                _ = try advance()  // consume number / realNumber
+                try builder.startNode(at: checkpoint, isReal ? .realExpr : .integerExpr)
+                try builder.finishNode()
+            } else {
+                _ = try advance()
+                try builder.startNode(at: checkpoint, .unaryExpr)
+                try parseExpression(minPrecedence: Self.prefixPrecedence)
+                try builder.finishNode()
+            }
 
         case .leftParen:
             _ = try advance()

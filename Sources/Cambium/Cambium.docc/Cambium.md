@@ -98,9 +98,9 @@ modules directly.
 - **CambiumCore** — The foundational layer: ``CambiumCore/RawSyntaxKind``,
   ``CambiumCore/SyntaxLanguage``, ``CambiumCore/TextSize``, ``CambiumCore/GreenNode``, ``CambiumCore/GreenToken``,
   ``CambiumCore/SyntaxTree``, ``CambiumCore/SyntaxNodeCursor``, ``CambiumCore/ReplacementWitness``.
-- **CambiumBuilder** — ``CambiumBuilder/GreenTreeBuilder``, ``CambiumBuilder/GreenNodeCache``,
-  ``CambiumBuilder/LocalTokenInterner``, ``CambiumBuilder/SharedTokenInterner``,
-  `SharedSyntaxTree.replacing(_:with:cache:)`.
+- **CambiumBuilder** — ``CambiumBuilder/GreenTreeBuilder``, ``CambiumBuilder/GreenTreeContext``,
+  ``CambiumBuilder/GreenNodeCache``, ``CambiumBuilder/LocalTokenInterner``,
+  ``CambiumBuilder/SharedTokenInterner``, `SharedSyntaxTree.replacing(_:with:context:)`.
 - **CambiumIncremental** — ``CambiumIncremental/ParseInput``, ``CambiumIncremental/IncrementalParseSession``,
   ``CambiumIncremental/ReuseOracle``, ``CambiumIncremental/ParseWitness``.
 - **CambiumAnalysis** — ``CambiumAnalysis/Diagnostic``, ``CambiumAnalysis/SyntaxMetadataStore``,
@@ -134,12 +134,15 @@ Languages are typically derived from a `UInt32`-backed enum using the
 
 ### Building a tree
 
+- <doc:ExternalizedInterning>
 - ``CambiumBuilder/GreenTreeBuilder``
+- ``CambiumBuilder/GreenTreeContext``
 - ``CambiumBuilder/GreenNodeCache``
 - ``CambiumBuilder/GreenCachePolicy``
 - ``CambiumBuilder/BuilderCheckpoint``
 - ``CambiumBuilder/GreenBuildResult``
 - ``CambiumBuilder/GreenTreeSnapshot``
+- ``CambiumCore/TokenInterner``
 - ``CambiumBuilder/LocalTokenInterner``
 - ``CambiumBuilder/SharedTokenInterner``
 

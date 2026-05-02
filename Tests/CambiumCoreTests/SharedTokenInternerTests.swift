@@ -64,3 +64,43 @@ import Testing
     let bytes = interner.withUTF8(first) { Array($0) }
     #expect(bytes == Array("hello".utf8))
 }
+
+@Test func largeTokenWorksWithSharedTokenInterner() {
+    let interner = SharedTokenInterner()
+
+    let alpha = "alpha-payload-α"
+    let beta = "beta-payload-β"
+    let alphaID = interner.storeLargeText(alpha)
+    let betaID = interner.storeLargeText(beta)
+
+    #expect(alphaID.rawValue == 0)
+    #expect(betaID.rawValue == 1)
+
+    // Equal payloads do NOT deduplicate (large-text contract).
+    let alphaAgainID = interner.storeLargeText(alpha)
+    #expect(alphaAgainID.rawValue == 2)
+
+    #expect(interner.resolveLargeText(alphaID) == alpha)
+    #expect(interner.resolveLargeText(betaID) == beta)
+    #expect(interner.resolveLargeText(alphaAgainID) == alpha)
+
+    let alphaBytes = interner.withLargeTextUTF8(alphaID) { Array($0) }
+    #expect(alphaBytes == Array(alpha.utf8))
+}
+
+@Test func sharedTokenInternerExposesNamespaceAndMakeResolverReturnsSelf() {
+    let interner = SharedTokenInterner()
+
+    // namespace (TokenInterner) and tokenKeyNamespace (TokenResolver)
+    // bridge to the same instance.
+    #expect(interner.tokenKeyNamespace === interner.namespace)
+
+    // Two distinct interners get distinct namespaces.
+    let other = SharedTokenInterner()
+    #expect(interner.namespace !== other.namespace)
+
+    // makeResolver returns the live interner itself.
+    let resolver = interner.makeResolver()
+    #expect(ObjectIdentifier(resolver as AnyObject) == ObjectIdentifier(interner))
+}
+

@@ -223,6 +223,67 @@ public extension TokenResolver {
     }
 }
 
+/// A write-capable token-text store: mints `TokenKey`s for new text and
+/// stores large-text payloads, paired with a method that yields the
+/// `TokenResolver` to associate with finished trees.
+///
+/// `TokenInterner` is deliberately a sibling of ``TokenResolver`` (not a
+/// refinement). `TokenResolver` is `Sendable`; if interning inherited that
+/// requirement, single-threaded interner backends would have to adopt
+/// `@unchecked Sendable` and silently expose mutable state where a
+/// thread-safe resolver is expected. Keeping the protocols disjoint means
+/// a single-owner interner like `LocalTokenInterner` need not conform to
+/// `TokenResolver` at all — its ``makeResolver()`` returns a frozen
+/// snapshot, and that snapshot is the resolver. Backends that genuinely
+/// are thread-safe (such as `SharedTokenInterner`) conform to both
+/// protocols separately.
+///
+/// **Lifetime.** `AnyObject`-constrained: interners are reference types.
+/// Their namespace identity is the instance identity. Holding the same
+/// `TokenInterner` instance from multiple builders means those builders
+/// share a token namespace and can fast-path subtree reuse via
+/// `SubtreeReuseOutcome.direct`.
+public protocol TokenInterner: AnyObject {
+    /// The interner's namespace identity. Stable for the lifetime of the
+    /// interner instance. Two `TokenKey`s minted by the same interner
+    /// share this namespace; keys minted by different interners do not.
+    var namespace: TokenKeyNamespace { get }
+
+    /// Intern a UTF-8 byte sequence and return its `TokenKey`. Validates
+    /// `bytes` as UTF-8 on first insertion; throws ``TokenTextError/invalidUTF8``
+    /// for ill-formed input. Repeated calls with the same bytes return
+    /// the same key.
+    func intern(_ bytes: UnsafeBufferPointer<UInt8>) throws -> TokenKey
+
+    /// Store `text` in the large-text table without interning, returning
+    /// its `LargeTokenTextID`. Use for inherently-unique payloads (long
+    /// string literals, raw text blocks) where interning would only waste
+    /// hash work.
+    func storeLargeText(_ text: String) -> LargeTokenTextID
+
+    /// The resolver to associate with a tree built using this interner.
+    /// `LocalTokenInterner` returns a frozen `TokenTextSnapshot`.
+    /// `SharedTokenInterner` returns `self` (live; `SharedTokenInterner`
+    /// also conforms to ``TokenResolver`` separately). Database-backed
+    /// adapters choose deliberately. Called by the builder's `finish()`
+    /// at the moment a tree is sealed; the result is stored on the
+    /// `GreenBuildResult` and reused, never recomputed.
+    func makeResolver() -> any TokenResolver
+}
+
+public extension TokenInterner {
+    /// Intern `text` and return its `TokenKey`. Default implementation
+    /// over the bytes form; conformers may override for a faster
+    /// String-typed fast path.
+    func intern(_ text: String) -> TokenKey {
+        var copy = text
+        return copy.withUTF8 { bytes in
+            // String guarantees valid UTF-8, so this never throws.
+            try! intern(bytes)
+        }
+    }
+}
+
 /// Immutable token-text table for a finished green tree.
 ///
 /// A snapshot resolves token keys that already exist in the tree it was

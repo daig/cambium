@@ -239,12 +239,28 @@ public struct IntegerExprSyntax: CalculatorSyntaxNode {
     public var literal: CalculatorTokenSyntax? {
         firstToken(kind: .number)
     }
+
+    /// The leading `-` token when this literal carries a sign. `nil` for
+    /// non-negative literals. The Calculator parser combines `-` with the
+    /// immediately-following number token into a single `IntegerExpr`,
+    /// rather than wrapping a positive literal in `UnaryExpr` — so the
+    /// AST faithfully represents that `-3` is one number.
+    public var minusSign: CalculatorTokenSyntax? {
+        firstToken(kind: .minus)
+    }
 }
 
 @CambiumSyntaxNode(CalculatorKind.self, for: .realExpr)
 public struct RealExprSyntax: CalculatorSyntaxNode {
     public var literal: CalculatorTokenSyntax? {
         firstToken(kind: .realNumber)
+    }
+
+    /// The leading `-` token when this literal carries a sign. `nil` for
+    /// non-negative literals. See ``IntegerExprSyntax/minusSign`` for the
+    /// rationale.
+    public var minusSign: CalculatorTokenSyntax? {
+        firstToken(kind: .minus)
     }
 }
 

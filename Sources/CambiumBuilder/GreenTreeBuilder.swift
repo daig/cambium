@@ -77,26 +77,31 @@ final class LocalTokenInternerStorage: @unchecked Sendable {
     var largeText: [String] = []
 }
 
-/// A move-only, single-document token interner.
+/// A single-owner token interner for in-process use.
 ///
-/// `LocalTokenInterner` deduplicates short token text within a single
-/// build. Its API surface (intern, store-large, snapshot) matches what
-/// ``CambiumBuilder/GreenTreeBuilder`` and ``CambiumBuilder/GreenNodeCache`` need — and in fact the
-/// builder owns the interner internally; you almost never need to
-/// construct one directly.
+/// `LocalTokenInterner` deduplicates short token text and stores
+/// large-text payloads for a single builder context. It conforms to
+/// ``CambiumCore/TokenInterner`` but **deliberately does not conform to
+/// ``CambiumCore/TokenResolver``** — the only path to a resolver is via
+/// ``makeResolver()``, which produces a frozen ``CambiumCore/TokenTextSnapshot``.
+/// Keeping the interner off the resolver surface means a single-owner
+/// mutable store cannot accidentally be passed where a thread-safe
+/// resolver is expected.
 ///
-/// Use this type when you need to write a custom builder pipeline that
-/// participates in the same dedup contract as ``CambiumBuilder/GreenTreeBuilder``. For
-/// thread-safe interning shared across builders, use
-/// ``CambiumBuilder/SharedTokenInterner`` instead.
-///
-/// The interner is `~Copyable` to make ownership boundaries explicit. Take
-/// a snapshot with ``snapshot()`` to hand out an immutable
-/// `TokenTextSnapshot` resolver.
-public struct LocalTokenInterner: ~Copyable {
+/// `LocalTokenInterner` is **not** `Sendable`. Single-owner discipline is a
+/// documented contract: do not share an instance between threads. For
+/// concurrent interning across multiple builders, use
+/// ``CambiumBuilder/SharedTokenInterner``.
+public final class LocalTokenInterner: TokenInterner {
     private let storage: LocalTokenInternerStorage
 
-    /// Construct a fresh interner with its own `TokenKeyNamespace`.
+    /// The interner's namespace identity. Stable for the lifetime of
+    /// this instance.
+    public var namespace: TokenKeyNamespace {
+        storage.tokenKeyNamespace
+    }
+
+    /// Construct a fresh interner with its own ``CambiumCore/TokenKeyNamespace``.
     public init() {
         self.storage = LocalTokenInternerStorage()
     }
@@ -105,19 +110,19 @@ public struct LocalTokenInterner: ~Copyable {
         self.storage = storage
     }
 
-    /// Intern `text` and return its `TokenKey`. Repeated calls with the
-    /// same text return the same key.
-    public mutating func intern(_ text: String) -> TokenKey {
+    /// Intern `text` and return its ``CambiumCore/TokenKey``. Repeated calls
+    /// with the same text return the same key.
+    public func intern(_ text: String) -> TokenKey {
         var copy = text
         return copy.withUTF8 { bytes in
             internValidated(text, bytes: bytes)
         }
     }
 
-    /// Intern a UTF-8 byte sequence and return its `TokenKey`. Validates
-    /// `bytes` as UTF-8 on first insertion; throws `TokenTextError.invalidUTF8`
-    /// for ill-formed input.
-    public mutating func intern(_ bytes: UnsafeBufferPointer<UInt8>) throws -> TokenKey {
+    /// Intern a UTF-8 byte sequence and return its ``CambiumCore/TokenKey``.
+    /// Validates `bytes` as UTF-8 on first insertion; throws
+    /// ``CambiumCore/TokenTextError/invalidUTF8`` for ill-formed input.
+    public func intern(_ bytes: UnsafeBufferPointer<UInt8>) throws -> TokenKey {
         let keyBytes = Array(bytes)
         if let key = storage.keysByText[keyBytes] {
             return key
@@ -128,11 +133,11 @@ public struct LocalTokenInterner: ~Copyable {
         return internValidated(text, keyBytes: keyBytes)
     }
 
-    private mutating func internValidated(_ text: String, bytes: UnsafeBufferPointer<UInt8>) -> TokenKey {
+    private func internValidated(_ text: String, bytes: UnsafeBufferPointer<UInt8>) -> TokenKey {
         internValidated(text, keyBytes: Array(bytes))
     }
 
-    private mutating func internValidated(_ text: String, keyBytes: [UInt8]) -> TokenKey {
+    private func internValidated(_ text: String, keyBytes: [UInt8]) -> TokenKey {
         if let key = storage.keysByText[keyBytes] {
             return key
         }
@@ -143,17 +148,29 @@ public struct LocalTokenInterner: ~Copyable {
     }
 
     /// Store `text` in the large-text table without interning, and return
-    /// its `LargeTokenTextID`. Use for unique payloads where
+    /// its ``CambiumCore/LargeTokenTextID``. Use for unique payloads where
     /// hash-interning would only waste hash work.
-    public mutating func storeLargeText(_ text: String) -> LargeTokenTextID {
+    public func storeLargeText(_ text: String) -> LargeTokenTextID {
         let id = LargeTokenTextID(UInt32(storage.largeText.count))
         storage.largeText.append(text)
         return id
     }
 
+    /// Return an immutable snapshot of the interner's current contents
+    /// to associate with a finished tree. Each call constructs a fresh
+    /// ``CambiumCore/TokenTextSnapshot`` (an O(n) copy of the interned-strings
+    /// arrays) — the builder calls this exactly once at `finish()` time
+    /// and stores the result on the build result.
+    public func makeResolver() -> any TokenResolver {
+        snapshot()
+    }
+
     /// Take an immutable snapshot of the interner's current contents,
-    /// suitable as a tree's resolver.
-    public borrowing func snapshot() -> TokenTextSnapshot {
+    /// suitable as a tree's resolver. Equivalent to ``makeResolver()``
+    /// returning a concrete `TokenTextSnapshot` (not erased to
+    /// `any TokenResolver`); kept on the class for callers that want
+    /// the concrete type.
+    public func snapshot() -> TokenTextSnapshot {
         TokenTextSnapshot(
             interned: storage.textByKey,
             large: storage.largeText,
@@ -209,7 +226,7 @@ enum SharedTokenInternerKeyLayout {
 /// 256 shards and 16,777,216 distinct token texts per shard are
 /// representable. Exhausting a shard traps; pick a shard count appropriate
 /// for the expected token vocabulary size.
-public final class SharedTokenInterner: TokenResolver, @unchecked Sendable {
+public final class SharedTokenInterner: TokenResolver, TokenInterner, @unchecked Sendable {
     struct Shard {
         var keysByText: [[UInt8]: TokenKey] = [:]
         var textByKey: [String] = []
@@ -217,11 +234,23 @@ public final class SharedTokenInterner: TokenResolver, @unchecked Sendable {
 
     private let shards: [MutexBox<Shard>]
 
-    /// The namespace identity of this interner. Trees that resolve through
-    /// this interner share this namespace, so subtree reuse via
+    /// Single-mutex large-text storage. Large-text writes are rare (one
+    /// per long string literal); contention with small-token interning is
+    /// segregated by mutex (small-token interning hits a per-shard
+    /// `MutexBox<Shard>`, large-text writes hit this independent box), so
+    /// neither path blocks the other.
+    private let largeTexts: MutexBox<[String]> = MutexBox([])
+
+    /// The interner's namespace identity. Stable for the lifetime of
+    /// this instance. Trees that resolve through this interner share
+    /// this namespace, so subtree reuse via
     /// ``CambiumBuilder/GreenTreeBuilder/reuseSubtree(_:)`` can fast-path
     /// (``CambiumBuilder/SubtreeReuseOutcome/direct``).
-    public let tokenKeyNamespace: TokenKeyNamespace? = TokenKeyNamespace()
+    public let namespace: TokenKeyNamespace = TokenKeyNamespace()
+
+    /// `TokenResolver`-side optional bridging to ``namespace``. Always
+    /// non-nil for a `SharedTokenInterner`.
+    public var tokenKeyNamespace: TokenKeyNamespace? { namespace }
 
     /// Construct a thread-safe interner with `shardCount` shards.
     /// Default of 8 is appropriate for moderate concurrency; raise to
@@ -326,6 +355,49 @@ public final class SharedTokenInterner: TokenResolver, @unchecked Sendable {
         return try text.utf8.withContiguousStorageIfAvailable(body)
             ?? Array(text.utf8).withUnsafeBufferPointer(body)
     }
+
+    /// Append `text` to the large-text table and return its
+    /// ``CambiumCore/LargeTokenTextID``. Thread-safe. Traps if the table
+    /// would exceed `UInt32.max` entries.
+    public func storeLargeText(_ text: String) -> LargeTokenTextID {
+        largeTexts.mutex.withLock { storage in
+            guard let raw = UInt32(exactly: storage.count) else {
+                preconditionFailure(
+                    "SharedTokenInterner exhausted its \(UInt32.max)-entry large-text key space"
+                )
+            }
+            storage.append(text)
+            return LargeTokenTextID(raw)
+        }
+    }
+
+    public func resolveLargeText(_ id: LargeTokenTextID) -> String {
+        let index = Int(id.rawValue)
+        return largeTexts.mutex.withLock { storage in
+            precondition(
+                storage.indices.contains(index),
+                "Unknown shared large token text id \(id.rawValue)"
+            )
+            return storage[index]
+        }
+    }
+
+    public func withLargeTextUTF8<R>(
+        _ id: LargeTokenTextID,
+        _ body: (UnsafeBufferPointer<UInt8>) throws -> R
+    ) rethrows -> R {
+        let text = resolveLargeText(id)
+        return try text.utf8.withContiguousStorageIfAvailable(body)
+            ?? Array(text.utf8).withUnsafeBufferPointer(body)
+    }
+
+    /// Return `self` as the resolver for a finished tree. Reading the
+    /// resolver always sees the live shared interner, including any new
+    /// keys minted after the tree was sealed; the existing keys remain
+    /// valid because `SharedTokenInterner` does not evict.
+    public func makeResolver() -> any TokenResolver {
+        self
+    }
 }
 
 struct TokenCacheKey: Hashable {
@@ -356,13 +428,12 @@ final class GreenNodeCacheStorage<Lang: SyntaxLanguage>: @unchecked Sendable {
     var nodeCache: [NodeCacheKey: [GreenNode<Lang>]] = [:]
     private var evictionQueue: [GreenCacheEntryKey] = []
     private var evictionHead: Int = 0
-    let interner: LocalTokenInternerStorage
     var hits: Int = 0
     var misses: Int = 0
     var bypasses: Int = 0
     var evictions: Int = 0
 
-    init(policy: GreenCachePolicy, interner: LocalTokenInternerStorage = LocalTokenInternerStorage()) {
+    init(policy: GreenCachePolicy) {
         switch policy {
         case .disabled, .documentLocal:
             break
@@ -370,7 +441,6 @@ final class GreenNodeCacheStorage<Lang: SyntaxLanguage>: @unchecked Sendable {
             precondition(maxEntries > 0, "Green cache entry limit must be positive")
         }
         self.policy = policy
-        self.interner = interner
     }
 
     var isEnabled: Bool {
@@ -494,29 +564,6 @@ public struct GreenNodeCache<Lang: SyntaxLanguage>: ~Copyable {
         storage.evictions
     }
 
-    /// Intern `text` and return its `TokenKey`. Equivalent to
-    /// ``LocalTokenInterner/intern(_:)-(String)`` against this cache's
-    /// owned interner.
-    public mutating func intern(_ text: String) -> TokenKey {
-        var interner = LocalTokenInterner(storage: storage.interner)
-        return interner.intern(text)
-    }
-
-    /// Intern UTF-8 bytes and return the `TokenKey`. See
-    /// ``LocalTokenInterner/intern(_:)-(UnsafeBufferPointer<UInt8>)``.
-    public mutating func intern(_ bytes: UnsafeBufferPointer<UInt8>) throws -> TokenKey {
-        var interner = LocalTokenInterner(storage: storage.interner)
-        return try interner.intern(bytes)
-    }
-
-    /// Store `text` in the large-text table without interning, and return
-    /// its `LargeTokenTextID`. Use for unique payloads where
-    /// hash-interning would only waste hash work.
-    public mutating func storeLargeText(_ text: String) -> LargeTokenTextID {
-        var interner = LocalTokenInterner(storage: storage.interner)
-        return interner.storeLargeText(text)
-    }
-
     /// Return a (possibly cached) green token for `(kind, textLength, text)`.
     ///
     /// When caching is enabled, identical token shapes deduplicate to the
@@ -588,6 +635,61 @@ public struct GreenNodeCache<Lang: SyntaxLanguage>: ~Copyable {
 
     consuming func takeStorage() -> GreenNodeCacheStorage<Lang> {
         storage
+    }
+}
+
+/// Bundle of `(interner, cache)`, namespace-bound by construction.
+///
+/// `GreenNodeCache` keys node storage by raw ``CambiumCore/TokenKey`` values.
+/// Mixing a cache populated under one interner's namespace with another
+/// interner silently returns wrong storage *and* defeats green-node
+/// identity (`ObjectIdentifier`) as the "same subtree" signal.
+/// `GreenTreeContext` makes the namespace pairing structural: the only
+/// public paths to construct a context bind a fresh cache to a chosen
+/// interner from birth, and the only path to reuse an existing cache is
+/// `GreenBuildResult.intoContext()`, which preserves whatever pairing
+/// the prior context established.
+///
+/// Use a context to drive a ``CambiumBuilder/GreenTreeBuilder``:
+///
+/// ```swift
+/// let context = GreenTreeContext<MyLang>(policy: .documentLocal)
+/// var builder = GreenTreeBuilder(context: consume context)
+/// // ... drive the builder ...
+/// let result = try builder.finish()
+/// // For a follow-up parse with structural reuse:
+/// var next = GreenTreeBuilder(context: consume result.intoContext())
+/// ```
+public struct GreenTreeContext<Lang: SyntaxLanguage>: ~Copyable {
+    /// The interner this context's keys belong to.
+    public let interner: any TokenInterner
+
+    /// The structural-dedup cache. Bound to ``interner``'s namespace by
+    /// construction; never mix with a cache from a different context.
+    public var cache: GreenNodeCache<Lang>
+
+    /// Adopt an external interner; mint a fresh cache subject to `policy`.
+    public init(interner: any TokenInterner, policy: GreenCachePolicy = .documentLocal) {
+        self.interner = interner
+        self.cache = GreenNodeCache(policy: policy)
+    }
+
+    /// Convenience for one-shot builds: mints a fresh ``LocalTokenInterner``
+    /// and a fresh cache, paired from birth.
+    public init(policy: GreenCachePolicy = .documentLocal) {
+        self.init(interner: LocalTokenInterner(), policy: policy)
+    }
+
+    /// **Internal only.** Rebind a previously-paired (interner, cache)
+    /// into a context. The single legal caller is
+    /// ``CambiumBuilder/GreenBuildResult/intoContext()``, which knows the
+    /// pairing came from a prior context and is therefore namespace-safe.
+    /// No public path exposes this initializer; arbitrary user pairings
+    /// would reintroduce the silent green-identity corruption hazard
+    /// that motivates the context wrapper in the first place.
+    internal init(interner: any TokenInterner, cache: consuming GreenNodeCache<Lang>) {
+        self.interner = interner
+        self.cache = cache
     }
 }
 
@@ -713,85 +815,103 @@ struct OpenNode {
 
 /// Cacheless snapshot of a finished green tree.
 ///
-/// `GreenTreeSnapshot` is the copyable `root + token text` view of a tree.
+/// `GreenTreeSnapshot` is the copyable `(root, resolver)` view of a tree.
 /// It is sufficient for rendering, serialization
 /// (`SharedSyntaxTree.serializeGreenSnapshot()` and friends), and
 /// creating a `SyntaxTree` via ``makeSyntaxTree()``. It does not carry
 /// the reusable builder cache needed for identity-preserving incremental
-/// reuse — for that, hold onto a ``CambiumBuilder/GreenBuildResult`` and pass it
-/// through ``CambiumBuilder/GreenBuildResult/intoCache()``.
+/// reuse — for that, hold onto a ``CambiumBuilder/GreenBuildResult`` and
+/// pass it through ``CambiumBuilder/GreenBuildResult/intoContext()``.
+///
+/// **Frozenness depends on the resolver's type.** A `TokenTextSnapshot`
+/// (the resolver returned by ``LocalTokenInterner/makeResolver()``) is
+/// frozen by construction. A live `SharedTokenInterner` (the resolver it
+/// returns from `makeResolver()`) may continue to accept new interns,
+/// though existing keys remain valid because shared interners do not
+/// evict. If you need a guaranteed-frozen snapshot — e.g., for
+/// serialization or hand-off across process boundaries —
+/// `GreenSnapshotEncoder`/`GreenSnapshotDecoder` always produces a
+/// fresh `TokenTextSnapshot` on decode.
 public struct GreenTreeSnapshot<Lang: SyntaxLanguage>: Sendable {
     /// The green root.
     public let root: GreenNode<Lang>
 
-    /// Immutable token text resolver that resolves every dynamic key in
-    /// `root`.
-    public let tokenText: TokenTextSnapshot
+    /// The resolver that resolves every dynamic key in `root`.
+    public let resolver: any TokenResolver
 
-    /// Pair a green root with the token text it depends on.
-    public init(root: GreenNode<Lang>, tokenText: TokenTextSnapshot) {
+    /// Pair a green root with the resolver it depends on.
+    public init(root: GreenNode<Lang>, resolver: any TokenResolver) {
         self.root = root
-        self.tokenText = tokenText
+        self.resolver = resolver
     }
 
     /// Construct a fresh `SyntaxTree` from this snapshot.
     public func makeSyntaxTree() -> SyntaxTree<Lang> {
-        SyntaxTree(root: root, resolver: tokenText)
+        SyntaxTree(root: root, resolver: resolver)
     }
 }
 
 /// Result of finishing a builder.
 ///
 /// `GreenBuildResult` is the move-only return type of
-/// ``CambiumBuilder/GreenTreeBuilder/finish()``. It bundles the freshly built green
-/// root, an immutable `TokenTextSnapshot`, and the builder's cache.
-/// Carrying the cache forward into the next builder via ``intoCache()``
-/// is the key to identity-preserving incremental parsing.
+/// ``CambiumBuilder/GreenTreeBuilder/finish()``. It bundles the freshly
+/// built green root, the resolver associated with the tree (sealed once
+/// at finish time via ``CambiumCore/TokenInterner/makeResolver()``), and
+/// the builder's context (interner + cache) for forwarding to a follow-up
+/// builder via ``intoContext()`` — the key to identity-preserving
+/// incremental parsing.
 ///
 /// ```swift
 /// let firstResult = try builder.finish()
 /// let firstTree = firstResult.snapshot.makeSyntaxTree()
-/// let cache = firstResult.intoCache()
+/// let context = firstResult.intoContext()
 ///
 /// // Later, for a reparse:
-/// var nextBuilder = GreenTreeBuilder<Calc>(cache: consume cache)
+/// var nextBuilder = GreenTreeBuilder<Calc>(context: consume context)
 /// // ...drive nextBuilder; reuseSubtree calls hit the fast path
 /// ```
 public struct GreenBuildResult<Lang: SyntaxLanguage>: ~Copyable {
     /// The green root of the finished tree.
     public let root: GreenNode<Lang>
 
-    /// Immutable token text resolver covering every dynamic key in the
-    /// finished tree.
-    public let tokenText: TokenTextSnapshot
+    /// Resolver associated with this tree. Sealed once at `finish()`
+    /// time via ``CambiumCore/TokenInterner/makeResolver()``; this is a
+    /// stored property, not computed, so successive accesses do not
+    /// re-snapshot (which for ``LocalTokenInterner`` would copy the
+    /// interned-strings array on every read).
+    public let resolver: any TokenResolver
 
+    private let interner: any TokenInterner
     private var cache: GreenNodeCache<Lang>
 
     /// Construct a result from explicit parts. Most code obtains a result
     /// by calling ``CambiumBuilder/GreenTreeBuilder/finish()``.
-    public init(
+    internal init(
         root: GreenNode<Lang>,
-        tokenText: TokenTextSnapshot,
+        resolver: any TokenResolver,
+        interner: any TokenInterner,
         cache: consuming GreenNodeCache<Lang>
     ) {
         self.root = root
-        self.tokenText = tokenText
+        self.resolver = resolver
+        self.interner = interner
         self.cache = cache
     }
 
-    /// A copyable, cacheless view of `(root, tokenText)`. Equivalent to
-    /// constructing a ``CambiumBuilder/GreenTreeSnapshot`` by hand.
+    /// A copyable, cacheless view of `(root, resolver)`. Reuses the
+    /// already-sealed resolver — does not invoke `makeResolver()` again.
     public var snapshot: GreenTreeSnapshot<Lang> {
-        GreenTreeSnapshot(root: root, tokenText: tokenText)
+        GreenTreeSnapshot(root: root, resolver: resolver)
     }
 
-    /// Consume this result and return the cache for the next builder.
+    /// Consume this result and return the context for the next builder.
+    /// Carries (interner, cache) as a unit — namespace pairing preserved.
     ///
-    /// Read ``root``, ``tokenText``, ``snapshot``, or
+    /// Read ``root``, ``resolver``, ``snapshot``, or
     /// `snapshot.makeSyntaxTree()` before calling this method — the
     /// result is consumed.
-    public consuming func intoCache() -> GreenNodeCache<Lang> {
-        cache
+    public consuming func intoContext() -> GreenTreeContext<Lang> {
+        GreenTreeContext(interner: interner, cache: cache)
     }
 }
 
@@ -873,7 +993,8 @@ struct CacheReplacementTokenRemapper<Lang: SyntaxLanguage> {
     mutating func remap(
         node: GreenNode<Lang>,
         replacementResolver: any TokenResolver,
-        cache: inout GreenNodeCache<Lang>
+        cache: inout GreenNodeCache<Lang>,
+        interner: any TokenInterner
     ) throws -> GreenNode<Lang> {
         var children: [GreenElement<Lang>] = []
         children.reserveCapacity(node.childCount)
@@ -883,13 +1004,15 @@ struct CacheReplacementTokenRemapper<Lang: SyntaxLanguage> {
                 children.append(.node(try remap(
                     node: child,
                     replacementResolver: replacementResolver,
-                    cache: &cache
+                    cache: &cache,
+                    interner: interner
                 )))
             case .token(let token):
                 children.append(.token(try remap(
                     token: token,
                     replacementResolver: replacementResolver,
-                    cache: &cache
+                    cache: &cache,
+                    interner: interner
                 )))
             }
         }
@@ -899,7 +1022,8 @@ struct CacheReplacementTokenRemapper<Lang: SyntaxLanguage> {
     mutating func remap(
         token: GreenToken<Lang>,
         replacementResolver: any TokenResolver,
-        cache: inout GreenNodeCache<Lang>
+        cache: inout GreenNodeCache<Lang>,
+        interner: any TokenInterner
     ) throws -> GreenToken<Lang> {
         let text: TokenTextStorage
         switch token.textStorage {
@@ -913,7 +1037,7 @@ struct CacheReplacementTokenRemapper<Lang: SyntaxLanguage> {
                 mapped = existing
             } else {
                 let newKey = try replacementResolver.withUTF8(key) { bytes in
-                    try cache.intern(bytes)
+                    try interner.intern(bytes)
                 }
                 internedMap[key] = newKey
                 mapped = newKey
@@ -921,7 +1045,7 @@ struct CacheReplacementTokenRemapper<Lang: SyntaxLanguage> {
             text = .interned(mapped)
         case .ownedLargeText(let id):
             let mapped = largeMap[id] ?? {
-                let newID = cache.storeLargeText(replacementResolver.resolveLargeText(id))
+                let newID = interner.storeLargeText(replacementResolver.resolveLargeText(id))
                 largeMap[id] = newID
                 return newID
             }()
@@ -1073,7 +1197,8 @@ struct ReusedSubtreeTokenRemapper<Lang: SyntaxLanguage> {
     mutating func remap(
         node: GreenNode<Lang>,
         sourceResolver: any TokenResolver,
-        cache: inout GreenNodeCache<Lang>
+        cache: inout GreenNodeCache<Lang>,
+        interner: any TokenInterner
     ) throws -> GreenNode<Lang> {
         var children: [GreenElement<Lang>] = []
         children.reserveCapacity(node.childCount)
@@ -1083,13 +1208,15 @@ struct ReusedSubtreeTokenRemapper<Lang: SyntaxLanguage> {
                 children.append(.node(try remap(
                     node: child,
                     sourceResolver: sourceResolver,
-                    cache: &cache
+                    cache: &cache,
+                    interner: interner
                 )))
             case .token(let token):
                 children.append(.token(try remap(
                     token: token,
                     sourceResolver: sourceResolver,
-                    cache: &cache
+                    cache: &cache,
+                    interner: interner
                 )))
             }
         }
@@ -1099,7 +1226,8 @@ struct ReusedSubtreeTokenRemapper<Lang: SyntaxLanguage> {
     mutating func remap(
         token: GreenToken<Lang>,
         sourceResolver: any TokenResolver,
-        cache: inout GreenNodeCache<Lang>
+        cache: inout GreenNodeCache<Lang>,
+        interner: any TokenInterner
     ) throws -> GreenToken<Lang> {
         let text: TokenTextStorage
         switch token.textStorage {
@@ -1113,7 +1241,7 @@ struct ReusedSubtreeTokenRemapper<Lang: SyntaxLanguage> {
                 mapped = existing
             } else {
                 let newKey = try sourceResolver.withUTF8(key) { bytes in
-                    try cache.intern(bytes)
+                    try interner.intern(bytes)
                 }
                 internedMap[key] = newKey
                 mapped = newKey
@@ -1121,7 +1249,7 @@ struct ReusedSubtreeTokenRemapper<Lang: SyntaxLanguage> {
             text = .interned(mapped)
         case .ownedLargeText(let id):
             let mapped = largeMap[id] ?? {
-                let newID = cache.storeLargeText(sourceResolver.resolveLargeText(id))
+                let newID = interner.storeLargeText(sourceResolver.resolveLargeText(id))
                 largeMap[id] = newID
                 return newID
             }()
@@ -1180,8 +1308,9 @@ struct ReusedSubtreeTokenRemapper<Lang: SyntaxLanguage> {
 /// ## Topics
 ///
 /// ### Constructing
-/// - ``init(cache:)``
+/// - ``init(context:)``
 /// - ``init(policy:)``
+/// - ``init(interner:policy:)``
 ///
 /// ### Building structure
 /// - ``startNode(_:)``
@@ -1208,34 +1337,38 @@ struct ReusedSubtreeTokenRemapper<Lang: SyntaxLanguage> {
 /// - ``finish()``
 public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
     private let builderID: UInt64
+    private let interner: any TokenInterner
     private let cacheStorage: GreenNodeCacheStorage<Lang>
     private var parents: [OpenNode]
     private var children: [GreenElement<Lang>]
     private var nextParentID: UInt64
     private var finished: Bool
 
-    /// Construct a builder that takes ownership of an existing cache.
-    /// Use this when you want to preserve structural sharing and token-key
-    /// namespace identity across a reparse.
-    public init(cache: consuming GreenNodeCache<Lang>) {
+    /// Construct a builder driven by `context`. Consumes the context as a
+    /// unit, preserving the namespace pairing between its interner and
+    /// cache.
+    public init(context: consuming GreenTreeContext<Lang>) {
         self.builderID = BuilderIDGenerator.make()
-        self.cacheStorage = cache.takeStorage()
+        self.interner = context.interner
+        self.cacheStorage = context.cache.takeStorage()
         self.parents = []
         self.children = []
         self.nextParentID = 1
         self.finished = false
     }
 
-    /// Construct a builder with a fresh cache governed by `policy`.
-    /// Default policy is ``CambiumBuilder/GreenCachePolicy/documentLocal``.
+    /// Convenience: construct a builder with a fresh ``LocalTokenInterner``
+    /// and a fresh cache governed by `policy`. Default policy is
+    /// ``CambiumBuilder/GreenCachePolicy/documentLocal``.
     public init(policy: GreenCachePolicy = .documentLocal) {
-        let cache = GreenNodeCacheStorage<Lang>(policy: policy)
-        self.builderID = BuilderIDGenerator.make()
-        self.cacheStorage = cache
-        self.parents = []
-        self.children = []
-        self.nextParentID = 1
-        self.finished = false
+        self.init(context: GreenTreeContext(policy: policy))
+    }
+
+    /// Convenience: construct a builder bound to an existing `interner`
+    /// (typically a ``CambiumBuilder/SharedTokenInterner`` shared across
+    /// concurrent workers). The cache is fresh and subject to `policy`.
+    public init(interner: any TokenInterner, policy: GreenCachePolicy = .documentLocal) {
+        self.init(context: GreenTreeContext(interner: interner, policy: policy))
     }
 
     /// Open a node of `kind` and start collecting its children.
@@ -1293,7 +1426,6 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
         if Lang.staticText(for: kind) != nil {
             throw GreenTreeBuilderError.staticKindRequiresStaticToken(Lang.rawKind(for: kind))
         }
-        var interner = LocalTokenInterner(storage: cacheStorage.interner)
         let key = try interner.intern(bytes)
         let length = try TextSize(exactly: bytes.count)
         var cache = GreenNodeCache<Lang>(storage: cacheStorage)
@@ -1315,7 +1447,6 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
         if Lang.staticText(for: kind) != nil {
             throw GreenTreeBuilderError.staticKindRequiresStaticToken(Lang.rawKind(for: kind))
         }
-        var interner = LocalTokenInterner(storage: cacheStorage.interner)
         let id = interner.storeLargeText(text)
         let length = try TextSize(byteCountOf: text)
         var cache = GreenNodeCache<Lang>(storage: cacheStorage)
@@ -1442,7 +1573,7 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
         precondition(!finished, "Cannot mutate a finished GreenTreeBuilder")
         let sourceResolver = node.resolver
         if let sourceNamespace = sourceResolver.tokenKeyNamespace,
-           sourceNamespace === cacheStorage.interner.tokenKeyNamespace
+           sourceNamespace === interner.namespace
         {
             node.green { green in
                 children.append(.node(green))
@@ -1456,7 +1587,8 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
             try remapper.remap(
                 node: green,
                 sourceResolver: sourceResolver,
-                cache: &cache
+                cache: &cache,
+                interner: interner
             )
         }
         children.append(.node(remapped))
@@ -1477,10 +1609,15 @@ public struct GreenTreeBuilder<Lang: SyntaxLanguage>: ~Copyable {
     /// (``CambiumBuilder/GreenTreeBuilderError/multipleRoots(_:)``).
     public consuming func finish() throws -> GreenBuildResult<Lang> {
         let root = try finishRoot()
-        let interner = LocalTokenInterner(storage: cacheStorage.interner)
+        // Seal the resolver once. For LocalTokenInterner this is the one
+        // O(n) snapshot copy of the interned-strings array; for shared
+        // backends it's just `self`. Stored on the result so that
+        // `result.resolver` and `result.snapshot.resolver` reuse it.
+        let resolver = interner.makeResolver()
         return GreenBuildResult(
             root: root,
-            tokenText: interner.snapshot(),
+            resolver: resolver,
+            interner: interner,
             cache: GreenNodeCache(storage: cacheStorage)
         )
     }
@@ -1609,30 +1746,32 @@ public extension SharedSyntaxTree {
     /// tree traps. (Cross-tree replacement is not a meaningful operation —
     /// translate the handle through your own tracker first.)
     ///
-    /// For full correctness when sharing a cache across builders or when
-    /// the replacement was built independently of this tree, pass a `cache`
-    /// whose interner is the one used to build this tree (typically
-    /// obtained via `result.intoCache()`). When the cache shares this
-    /// tree's namespace, the result tree's resolver is a fresh snapshot of
-    /// the cache covering every key referenced by the new tree.
+    /// For full correctness when sharing storage across builders or when
+    /// the replacement was built independently of this tree, pass a
+    /// `context` whose interner is the one used to build this tree
+    /// (typically obtained via `result.intoContext()`). When the
+    /// context's interner shares this tree's namespace, the result tree's
+    /// resolver is the fresh resolver returned by
+    /// ``CambiumCore/TokenInterner/makeResolver()`` covering every key
+    /// referenced by the new tree.
     ///
-    /// In the rare case where the replacement is in the same namespace as
-    /// this tree but the cache passed in is in a different namespace, this
-    /// tree's resolver is reused as-is. If the replacement was taken from
-    /// a fresher snapshot of the same shared interner, rendering may
-    /// precondition-fail on keys that postdate this tree's snapshot. Pass
-    /// a namespace-matching cache to avoid this.
+    /// If only the replacement shares this tree's namespace but the
+    /// context does not, this tree's resolver is reused as-is. If the
+    /// replacement was taken from a fresher snapshot of the same shared
+    /// interner, rendering may precondition-fail on keys that postdate
+    /// this tree's snapshot. Pass a namespace-matching context to avoid
+    /// this.
     ///
-    /// If neither the replacement nor the cache shares this tree's namespace,
-    /// replacement falls back to an overlay resolver. That fallback preserves
-    /// structural sharing and correctness, but intentionally exposes no
-    /// `tokenKeyNamespace`; future `reuseSubtree` calls with a cache must
-    /// remap dynamic token keys instead of direct-reusing the overlay-backed
-    /// green storage. Revisit this with the broader cache-lineage redesign.
+    /// If neither the replacement nor the context shares this tree's
+    /// namespace, replacement falls back to an overlay resolver. That
+    /// fallback preserves structural sharing and correctness, but
+    /// intentionally exposes no `tokenKeyNamespace`; future
+    /// `reuseSubtree` calls with a context must remap dynamic token keys
+    /// instead of direct-reusing the overlay-backed green storage.
     func replacing(
         _ handle: SyntaxNodeHandle<Lang>,
         with replacement: ResolvedGreenNode<Lang>,
-        cache: inout GreenNodeCache<Lang>
+        context: inout GreenTreeContext<Lang>
     ) throws -> ReplacementResult<Lang> {
         precondition(
             handle.identity.treeID == treeID,
@@ -1665,21 +1804,20 @@ public extension SharedSyntaxTree {
         {
             let newRoot: GreenNode<Lang>
             let resultResolver: any TokenResolver
-            if targetNamespace === cache.storage.interner.tokenKeyNamespace {
+            if targetNamespace === context.interner.namespace {
                 newRoot = try rebuildReplacingCached(
                     root: oldRoot,
                     path: ArraySlice(replacedPath),
                     replacement: replacement.root,
-                    cache: &cache
+                    cache: &context.cache
                 )
-                // Fresh snapshot of the cache's interner. Required for
-                // correctness when the cache has grown beyond this tree's
+                // Fresh resolver from the context's interner. Required for
+                // correctness when the interner has grown beyond this tree's
                 // resolver snapshot (e.g., another builder using the same
-                // cache minted keys after this tree finished). The new
-                // snapshot shares the cache's `tokenKeyNamespace`, so
+                // interner minted keys after this tree finished). The new
+                // resolver shares the context interner's namespace, so
                 // namespace-identity continuity is preserved.
-                let interner = LocalTokenInterner(storage: cache.storage.interner)
-                resultResolver = interner.snapshot()
+                resultResolver = context.interner.makeResolver()
             } else {
                 newRoot = try rebuildReplacingDirect(
                     root: oldRoot,
@@ -1702,13 +1840,14 @@ public extension SharedSyntaxTree {
         }
 
         if let targetNamespace = resolver.tokenKeyNamespace,
-           targetNamespace === cache.storage.interner.tokenKeyNamespace
+           targetNamespace === context.interner.namespace
         {
             var remapper = CacheReplacementTokenRemapper<Lang>()
             let remappedReplacement = try remapper.remap(
                 node: replacement.root,
                 replacementResolver: replacement.resolver,
-                cache: &cache
+                cache: &context.cache,
+                interner: context.interner
             )
             let newRoot: GreenNode<Lang>
             if oldSubtree.identity == remappedReplacement.identity {
@@ -1718,16 +1857,17 @@ public extension SharedSyntaxTree {
                     root: oldRoot,
                     path: ArraySlice(replacedPath),
                     replacement: remappedReplacement,
-                    cache: &cache
+                    cache: &context.cache
                 )
             }
-            // Fresh snapshot of the cache's interner. Re-interning may have
-            // returned existing keys minted before this tree's resolver
-            // snapshot was taken (e.g., from another builder sharing the
-            // cache), so reusing `resolver` could leave the new tree
-            // referencing keys outside its snapshot.
-            let interner = LocalTokenInterner(storage: cache.storage.interner)
-            let resultResolver = interner.snapshot()
+            // Fresh resolver from the context's interner. Re-interning may
+            // have returned existing keys minted before this tree's
+            // resolver snapshot was taken (e.g., from another builder
+            // sharing the interner), so reusing `resolver` could leave
+            // the new tree referencing keys outside its snapshot. Captured
+            // *after* the rebuild so any keys minted during remapping are
+            // present in the resolver.
+            let resultResolver = context.interner.makeResolver()
             let witness = ReplacementWitness(
                 oldRoot: oldRoot,
                 newRoot: newRoot,
@@ -1789,31 +1929,32 @@ public extension SharedSyntaxTree {
         )
     }
 
-    /// Same as `replacing(_:with:cache:)` for `ResolvedGreenNode`, but accepts
-    /// a cacheless snapshot produced by an independent `GreenTreeBuilder`.
+    /// Same as `replacing(_:with:context:)` for `ResolvedGreenNode`, but
+    /// accepts a cacheless snapshot produced by an independent
+    /// `GreenTreeBuilder`.
     func replacing(
         _ handle: SyntaxNodeHandle<Lang>,
         with replacement: GreenTreeSnapshot<Lang>,
-        cache: inout GreenNodeCache<Lang>
+        context: inout GreenTreeContext<Lang>
     ) throws -> ReplacementResult<Lang> {
         try replacing(
             handle,
-            with: ResolvedGreenNode(root: replacement.root, resolver: replacement.tokenText),
-            cache: &cache
+            with: ResolvedGreenNode(root: replacement.root, resolver: replacement.resolver),
+            context: &context
         )
     }
 
-    /// Same as `replacing(_:with:cache:)` for `GreenTreeSnapshot`, but borrows
-    /// the snapshot view from a cache-preserving build result.
+    /// Same as `replacing(_:with:context:)` for `GreenTreeSnapshot`, but
+    /// borrows the snapshot view from a context-preserving build result.
     func replacing(
         _ handle: SyntaxNodeHandle<Lang>,
         with replacement: borrowing GreenBuildResult<Lang>,
-        cache: inout GreenNodeCache<Lang>
+        context: inout GreenTreeContext<Lang>
     ) throws -> ReplacementResult<Lang> {
         try replacing(
             handle,
-            with: ResolvedGreenNode(root: replacement.root, resolver: replacement.tokenText),
-            cache: &cache
+            with: ResolvedGreenNode(root: replacement.root, resolver: replacement.resolver),
+            context: &context
         )
     }
 }

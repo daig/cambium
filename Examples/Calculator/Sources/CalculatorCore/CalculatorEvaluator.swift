@@ -168,7 +168,8 @@ internal struct CalculatorEvaluator {
             // is rare and we want it in the diagnostic.
             throw CalculatorEvaluationError.integerLiteralOutOfRange(token.text, token.range)
         }
-        return .integer(value)
+        // value ∈ [0, Int64.max], so -value ∈ [Int64.min+1, 0] — never overflows.
+        return .integer(expression.minusSign != nil ? -value : value)
     }
 
     /// Real literals fall back to `Double(_:)` because the stdlib has no
@@ -185,7 +186,7 @@ internal struct CalculatorEvaluator {
         guard let value = Double(text), value.isFinite else {
             throw CalculatorEvaluationError.realLiteralOutOfRange(text, token.range)
         }
-        return .real(value)
+        return .real(expression.minusSign != nil ? -value : value)
     }
 
     private mutating func evaluateUnary(_ expression: UnaryExprSyntax) throws -> CalculatorValue {

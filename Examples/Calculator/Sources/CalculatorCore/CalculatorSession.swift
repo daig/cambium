@@ -38,7 +38,7 @@
 import Cambium
 
 public final class CalculatorSession {
-    private var cache: GreenNodeCache<CalculatorLanguage>?
+    private var context: GreenTreeContext<CalculatorLanguage>?
     private var lastTree: SharedSyntaxTree<CalculatorLanguage>?
     private var lastDiagnostics: [CalculatorDiagnostic] = []
     private var incremental = IncrementalParseSession<CalculatorLanguage>()
@@ -67,8 +67,8 @@ public final class CalculatorSession {
         lastParallelEvaluationReport = nil
 
         let builder: GreenTreeBuilder<CalculatorLanguage>
-        if let existing = cache.take() {
-            builder = GreenTreeBuilder(cache: existing)
+        if let existing = context.take() {
+            builder = GreenTreeBuilder(context: consume existing)
         } else {
             builder = GreenTreeBuilder(policy: .parseSession(maxEntries: 16_384))
         }
@@ -83,13 +83,13 @@ public final class CalculatorSession {
         try parser.parse()
         let output = try parser.finishBuild()
 
-        // Read the snapshot before consuming the build for its cache. Order
-        // matters: `intoCache()` is `consuming`, after which `output.build`
-        // is gone.
+        // Read the snapshot before consuming the build for its context.
+        // Order matters: `intoContext()` is `consuming`, after which
+        // `output.build` is gone.
         let tree = output.build.snapshot.makeSyntaxTree().intoShared()
         let diagnostics = output.diagnostics
         let acceptedReuses = output.acceptedReuses
-        let nextCache = output.build.intoCache()
+        let nextContext = output.build.intoContext()
         let calculatorDiagnostics = diagnostics.map(CalculatorDiagnostic.init(_:))
         let witness = makeParseWitness(
             previousTree: previousTree,
@@ -101,7 +101,7 @@ public final class CalculatorSession {
         }
         evaluationCache.removeValues(notMatching: tree.treeID)
 
-        cache = consume nextCache
+        context = consume nextContext
         lastTree = tree
         lastDiagnostics = calculatorDiagnostics
         return CalculatorParseResult(
@@ -114,11 +114,12 @@ public final class CalculatorSession {
     /// snapshot, as this session's current tree.
     ///
     /// The adopted tree's resolver carries its own token-key namespace, so
-    /// any existing cache cannot safely be shared with subsequent parses. The
-    /// next `parse(_:edits:)` call will mint a fresh cache; any subtree reuse
-    /// from the adopted tree will remap dynamic token keys into that cache.
+    /// any existing context cannot safely be shared with subsequent parses.
+    /// The next `parse(_:edits:)` call will mint a fresh context; any
+    /// subtree reuse from the adopted tree will remap dynamic token keys
+    /// into that context.
     public func adopt(_ tree: SharedSyntaxTree<CalculatorLanguage>) {
-        cache = nil
+        context = nil
         lastTree = tree
         lastDiagnostics = []
         evaluationCache.removeAll()
@@ -143,11 +144,11 @@ public final class CalculatorSession {
             )
         }
 
-        var foldCache: GreenNodeCache<CalculatorLanguage>
-        if let existing = cache.take() {
-            foldCache = existing
+        var foldContext: GreenTreeContext<CalculatorLanguage>
+        if let existing = context.take() {
+            foldContext = existing
         } else {
-            foldCache = GreenNodeCache(policy: .parseSession(maxEntries: 16_384))
+            foldContext = GreenTreeContext(policy: .parseSession(maxEntries: 16_384))
         }
 
         var steps: [FoldStep] = []
@@ -155,10 +156,10 @@ public final class CalculatorSession {
             let output = try applyFold(
                 candidate,
                 in: currentTree,
-                cache: consume foldCache
+                context: consume foldContext
             )
             let step = output.step
-            foldCache = output.intoCache()
+            foldContext = output.intoContext()
             translateEvaluationCache(
                 from: currentTree,
                 to: step.newTree,
@@ -172,7 +173,7 @@ public final class CalculatorSession {
         let finalSource = currentTree.withRoot { root in
             root.makeString()
         }
-        cache = consume foldCache
+        context = consume foldContext
         lastTree = currentTree
         lastDiagnostics = []
         evaluationMetadata = SyntaxMetadataStore<CalculatorLanguage>()
@@ -304,7 +305,7 @@ public final class CalculatorSession {
     /// counters). After `reset()` the session is observationally
     /// indistinguishable from a fresh `CalculatorSession()`.
     public func reset() {
-        cache = nil
+        context = nil
         lastTree = nil
         lastDiagnostics = []
         evaluationCache.removeAll()

@@ -29,7 +29,7 @@ import Testing
     #expect(targetTree.withRoot { $0.makeString() } == "targetsource+é")
 }
 
-@Test func finishReturnsCacheForIdentityPreservingSubtreeReuse() throws {
+@Test func finishReturnsContextForIdentityPreservingSubtreeReuse() throws {
     var firstBuilder = GreenTreeBuilder<TestLanguage>()
     firstBuilder.startNode(.root)
     firstBuilder.startNode(.list)
@@ -48,9 +48,9 @@ import Testing
         Issue.record("Expected source list node")
         return
     }
-    let cache = firstResult.intoCache()
+    let context = firstResult.intoContext()
 
-    var secondBuilder = GreenTreeBuilder<TestLanguage>(cache: consume cache)
+    var secondBuilder = GreenTreeBuilder<TestLanguage>(context: consume context)
     secondBuilder.startNode(.root)
     let outcome: SubtreeReuseOutcome? = try firstTree.withRoot { root in
         try root.withChildNode(at: 0) { list in
@@ -70,4 +70,66 @@ import Testing
     #expect(outcome == .direct)
     #expect(reusedListIdentity == originalListIdentity)
     #expect(secondTree.withRoot { $0.makeString() } == "shared")
+}
+
+@Test func parallelBuildersWithSharedInternerMutuallyDirectReuse() throws {
+    // Four worker contexts, each with its own GreenNodeCache but bound
+    // to one shared interner. Each worker builds a small subtree
+    // containing the same identifier text. The master builder splices
+    // each worker's subtree via reuseSubtree; every outcome must be
+    // .direct because they share a token namespace.
+    //
+    // Note: we do NOT assert green-storage identity equivalence across
+    // workers — they have independent green caches, so structurally-
+    // equal subtrees may have distinct ObjectIdentifiers. Cross-cache
+    // structural sharing requires SharedGreenNodeCache integration,
+    // which is a separate follow-up.
+    let shared = SharedTokenInterner()
+    let commonKey = shared.intern("common")
+
+    var workerOutcomes: [SubtreeReuseOutcome] = []
+    var masterBuilder = GreenTreeBuilder<TestLanguage>(interner: shared)
+    masterBuilder.startNode(.root)
+
+    // Build each worker subtree, hand it to the master via reuseSubtree
+    // immediately. SyntaxTree is ~Copyable so we can't collect a batch
+    // first; structuring the loop this way also matches how a real
+    // parallel-parsing pipeline would funnel worker results into the
+    // master builder via Swift concurrency.
+    for workerIndex in 0..<4 {
+        var workerBuilder = GreenTreeBuilder<TestLanguage>(
+            interner: shared,
+            policy: .documentLocal
+        )
+        workerBuilder.startNode(.list)
+        try workerBuilder.token(.identifier, text: "shared\(workerIndex)")
+        try workerBuilder.token(.identifier, text: "common")
+        try workerBuilder.finishNode()
+        let workerResult = try workerBuilder.finish()
+        let workerTree = workerResult.snapshot.makeSyntaxTree()
+
+        let outcome = try workerTree.withRoot { root in
+            try masterBuilder.reuseSubtree(root)
+        }
+        workerOutcomes.append(outcome)
+    }
+
+    try masterBuilder.finishNode()
+    let masterResult = try masterBuilder.finish()
+    let masterTree = masterResult.snapshot.makeSyntaxTree()
+
+    // Every reuse should hit the .direct fast path because all workers
+    // share the master's interner (and therefore its namespace).
+    #expect(workerOutcomes.count == 4)
+    #expect(workerOutcomes.allSatisfy { $0 == .direct })
+
+    // Calling intern("common") again on the shared interner returns
+    // the same key, because the interner deduplicates and every worker
+    // contributed via the same interner instance.
+    #expect(shared.intern("common") == commonKey)
+
+    // The master tree renders the concatenation of every worker's
+    // contribution, with token text resolved through the shared interner.
+    let expected = (0..<4).map { "shared\($0)common" }.joined()
+    #expect(masterTree.withRoot { $0.makeString() } == expected)
 }

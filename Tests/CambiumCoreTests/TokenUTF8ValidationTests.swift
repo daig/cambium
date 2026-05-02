@@ -43,13 +43,13 @@ import Testing
     #expect(didThrow)
 }
 
-@Test func greenNodeCacheRejectsInvalidInternedBytes() {
-    var cache = GreenNodeCache<TestLanguage>()
+@Test func localTokenInternerRejectsInvalidInternedBytes() {
+    let interner = LocalTokenInterner()
     let invalidBytes: [UInt8] = [0xff]
 
     let didThrow = invalidBytes.withUnsafeBufferPointer { bytes in
         do {
-            _ = try cache.intern(bytes)
+            _ = try interner.intern(bytes)
             return false
         } catch TokenTextError.invalidUTF8 {
             return true
