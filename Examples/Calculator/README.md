@@ -37,6 +37,7 @@ REPL commands:
   prints each `ReplacementWitness` classification demo.
 - `:counters` prints incremental reuse counters and evaluator cache stats.
 - `:cached` prints cached evaluator values attached to current-tree nodes.
+- `:peval` evaluates the current document with the parallel fork/join evaluator.
 - `:reset` drops the current session state.
 - `:help` prints commands.
 - `:q` or `:quit` exits.
@@ -115,3 +116,63 @@ calc> :cached
 The evaluator short-circuits cached parents, so a reused `round(2)` hit skips
 its literal child during the actual evaluation. `:cached` still shows translated
 descendant entries when they exist.
+
+## Parallel Evaluation
+
+`:peval` walks the typed AST with a structured-concurrent fork/join evaluator
+that spawns the LHS and RHS of every `BinaryExpr` into concurrent child tasks
+via `async let`. Result-equivalent to `:show` / sequential `evaluate()`, but
+it exercises the Cambium types involved in sharing trees across tasks:
+
+- `SharedSyntaxTree` is `Sendable`, so the same tree reference reaches every
+  task without copying. Cambium's red-tree layer realizes lazily under
+  lock-free atomic slots, so two tasks descending into different siblings
+  of the same parent never observe inconsistent state.
+- The typed AST overlays (`ExprSyntax`, `BinaryExprSyntax`, …) and the
+  generic `SyntaxNodeHandle` are `Sendable, Hashable`, so handing a
+  sub-expression to a child task is just an argument pass.
+- A `SyntaxMetadataStore<CalculatorLanguage>` is shared across every task.
+  The store serializes its own reads and writes via an internal mutex,
+  so the parallel evaluator's per-node order writes work without any
+  extra synchronization.
+- A new `SyntaxDataKey<Int>` (`com.cambium.examples.calculator.peval.completion-order`)
+  records the per-node completion order from a shared atomic counter. The
+  sequential evaluator's per-instance order key (`evaluation.order`) is
+  left untouched, so a tree evaluated both ways carries both orderings.
+
+```text
+calc> (1 + 2) * (3 + 4) - round(5.5) / 2
+18
+calc> :peval
+18 (parallel)
+forks=5 evals=14 cacheHits=0 peakConcurrency=12 elapsed=0.213ms
+calc> :cached
+0..<7 = 3 kind=integer peval=11
+0..<18 = 21 kind=integer peval=13
+0..<34 = 18 kind=integer peval=14
+1..<2 = 1 kind=integer peval=4
+...
+```
+
+`forks` counts every `BinaryExpr` site (one `async let` LHS / `async let` RHS
+pair). `peakConcurrency` is the peak observed in-flight task count; it
+includes parents suspended waiting on their children, so a balanced binary
+tree of depth `d` reports up to `2d - 1`. `:cached` surfaces the new
+`peval=N` per-node label so deeper sub-expressions (which finish first under
+fork/join scheduling) carry low order numbers.
+
+The session's `:peval` runs without an `ExternalAnalysisCache` so each
+invocation actually exercises the fork/join evaluator. To exercise the
+cross-task cache-sharing path — e.g. running the parallel evaluator over
+a tree whose root is already memoized — call
+`evaluateCalculatorTreeInParallel(_:cache:metadata:)` directly with an
+explicit cache. The `parallelEvaluatorSharesCacheAcrossPasses` test in
+`Tests/CalculatorCoreTests/ParallelEvaluatorTests.swift` shows the
+shape: two passes against the same cache, second pass short-circuits at
+the root with one cache hit and no forks.
+
+The `concurrentParallelEvaluationsAreConsistent` test in the same file
+demonstrates the multi-reader invariant: 16 concurrent
+`evaluateCalculatorTreeInParallel` calls on the same `SharedSyntaxTree`
+with shared `ExternalAnalysisCache` + `SyntaxMetadataStore`, all
+returning the same value.

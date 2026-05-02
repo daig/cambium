@@ -45,6 +45,7 @@ public final class CalculatorSession {
     private let evaluationCache = ExternalAnalysisCache<CalculatorLanguage, CalculatorValue>()
     private var evaluationMetadata = SyntaxMetadataStore<CalculatorLanguage>()
     private var lastEvaluationStats = CalculatorEvaluationStats()
+    private var lastParallelEvaluationReport: ParallelEvaluationReport?
 
     public init() {}
 
@@ -63,6 +64,7 @@ public final class CalculatorSession {
         _ = incremental.consumeAcceptedReuses()
         evaluationMetadata = SyntaxMetadataStore<CalculatorLanguage>()
         lastEvaluationStats = CalculatorEvaluationStats()
+        lastParallelEvaluationReport = nil
 
         let builder: GreenTreeBuilder<CalculatorLanguage>
         if let existing = cache.take() {
@@ -122,6 +124,7 @@ public final class CalculatorSession {
         evaluationCache.removeAll()
         evaluationMetadata = SyntaxMetadataStore<CalculatorLanguage>()
         lastEvaluationStats = CalculatorEvaluationStats()
+        lastParallelEvaluationReport = nil
     }
 
     /// Constant-fold the current document one subtree replacement at a
@@ -174,6 +177,7 @@ public final class CalculatorSession {
         lastDiagnostics = []
         evaluationMetadata = SyntaxMetadataStore<CalculatorLanguage>()
         lastEvaluationStats = CalculatorEvaluationStats()
+        lastParallelEvaluationReport = nil
         return FoldReport(
             steps: steps,
             finalTree: currentTree,
@@ -190,6 +194,12 @@ public final class CalculatorSession {
     /// Stats from the most recent `evaluate()` invocation.
     public var evaluationStats: CalculatorEvaluationStats {
         lastEvaluationStats
+    }
+
+    /// Stats from the most recent `evaluateInParallel()` invocation, or
+    /// `nil` if the parallel evaluator has never run on this session.
+    public var parallelEvaluationReport: ParallelEvaluationReport? {
+        lastParallelEvaluationReport
     }
 
     /// Evaluate the current document, memoizing per-node values in the
@@ -213,6 +223,41 @@ public final class CalculatorSession {
         let value = try evaluator.evaluateTree(tree)
         lastEvaluationStats = evaluator.stats
         return value
+    }
+
+    /// Evaluate the current document concurrently. Forks the LHS and
+    /// RHS of every `BinaryExpr` into structured-concurrent child tasks
+    /// (`async let`) and writes per-node completion order into a fresh
+    /// ``SyntaxMetadataStore`` so ``cachedValues()`` can surface
+    /// `peval=N` labels.
+    ///
+    /// Unlike ``evaluate()``, this entry point intentionally uses a
+    /// fresh cache for each call — it surfaces the parallel evaluator's
+    /// actual fork/join activity instead of short-circuiting at the
+    /// root via the session's long-lived ``ExternalAnalysisCache``.
+    /// Code that wants the cross-pass cache-sharing path should call
+    /// ``evaluateCalculatorTreeInParallel(_:cache:metadata:)`` directly
+    /// with the session's tree and an explicit cache.
+    public func evaluateInParallel() async throws
+        -> (value: CalculatorValue, report: ParallelEvaluationReport)
+    {
+        guard let tree = lastTree else {
+            throw CalculatorEvaluationError.invalidSyntax("no current document")
+        }
+        guard lastDiagnostics.isEmpty else {
+            throw CalculatorEvaluationError.invalidSyntax(
+                lastDiagnostics.map(formatDiagnostic).joined(separator: "\n")
+            )
+        }
+
+        evaluationMetadata = SyntaxMetadataStore<CalculatorLanguage>()
+        let outcome = try await evaluateCalculatorTreeInParallel(
+            tree,
+            cache: nil,
+            metadata: evaluationMetadata
+        )
+        lastParallelEvaluationReport = outcome.report
+        return outcome
     }
 
     /// Memoized evaluation values for every cached expression node in
@@ -239,6 +284,7 @@ public final class CalculatorSession {
                     range: node.textRange,
                     value: value,
                     evaluationOrder: metadata.value(for: calculatorEvaluationOrderKey, on: handle),
+                    parallelOrder: metadata.value(for: calculatorParallelTaskOrderKey, on: handle),
                     valueKind: metadata.value(for: calculatorEvaluationKindKey, on: handle)
                 ))
                 return .continue
@@ -264,6 +310,7 @@ public final class CalculatorSession {
         evaluationCache.removeAll()
         evaluationMetadata = SyntaxMetadataStore<CalculatorLanguage>()
         lastEvaluationStats = CalculatorEvaluationStats()
+        lastParallelEvaluationReport = nil
         // Replacing the IncrementalParseSession is the only way to zero
         // the offer-side counters: the type does not expose a counter
         // reset.

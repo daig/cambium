@@ -268,7 +268,7 @@ internal struct CalculatorEvaluator {
 
 // MARK: - Arithmetic helpers
 
-private func evaluateIntegerBinary(
+internal func evaluateIntegerBinary(
     _ lhs: Int64,
     _ rhs: Int64,
     operatorKind: CalculatorBinaryOperator,
@@ -295,7 +295,7 @@ private func evaluateIntegerBinary(
     return .integer(result.partialValue)
 }
 
-private func evaluateRealBinary(
+internal func evaluateRealBinary(
     _ lhs: Double,
     _ rhs: Double,
     operatorKind: CalculatorBinaryOperator,
@@ -325,7 +325,7 @@ private func evaluateRealBinary(
 /// Parse `bytes` as a base-10 ASCII unsigned integer. Returns `nil` on
 /// any non-digit byte or on overflow. The lexer already rejected any
 /// leading sign or non-digit; this is a hot-path digit accumulator.
-private func parseInt64(asciiDigits bytes: UnsafeBufferPointer<UInt8>) -> Int64? {
+internal func parseInt64(asciiDigits bytes: UnsafeBufferPointer<UInt8>) -> Int64? {
     guard !bytes.isEmpty else {
         return nil
     }

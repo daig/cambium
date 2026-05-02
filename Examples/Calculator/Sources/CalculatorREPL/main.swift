@@ -4,7 +4,7 @@ import Foundation
 
 @main
 struct CalculatorREPL {
-    static func main() {
+    static func main() async {
         var session = CalculatorSession()
         var document: String = ""
         var lastResult: CalculatorParseResult?
@@ -77,6 +77,13 @@ struct CalculatorREPL {
                 continue
             case ":cached":
                 printCachedValues(session.cachedValues())
+                continue
+            case ":peval":
+                if document.isEmpty {
+                    print("error: no current document")
+                } else {
+                    await pevalAndPrint(session: session, document: document)
+                }
                 continue
             case ":hash":
                 if let result = lastResult {
@@ -332,6 +339,7 @@ struct CalculatorREPL {
           :fold                       constant-fold current document, showing witnesses
           :counters                   print incremental reuse and evaluator cache counters
           :cached                     print cached evaluator values for the current tree
+          :peval                      evaluate the current document with the parallel fork/join evaluator
           :reset                      drop session state (cache, last tree, counters)
           :tree                       toggle CST dumps
           :ast                        toggle typed AST dumps
@@ -400,14 +408,42 @@ struct CalculatorREPL {
         }
 
         for value in values {
-            let metadata: String
-            if let order = value.evaluationOrder, let kind = value.valueKind {
-                metadata = " order=\(order) kind=\(kind)"
-            } else {
-                metadata = ""
+            var fragments: [String] = []
+            if let kind = value.valueKind {
+                fragments.append("kind=\(kind)")
             }
+            if let order = value.evaluationOrder {
+                fragments.append("order=\(order)")
+            }
+            if let parallelOrder = value.parallelOrder {
+                fragments.append("peval=\(parallelOrder)")
+            }
+            let metadata = fragments.isEmpty ? "" : " " + fragments.joined(separator: " ")
             print("\(format(value.range)) = \(value.value)\(metadata)")
         }
+    }
+
+    private static func pevalAndPrint(
+        session: CalculatorSession,
+        document: String
+    ) async {
+        do {
+            let outcome = try await session.evaluateInParallel()
+            print("\(outcome.value) (parallel)")
+            print(formatParallelReport(outcome.report))
+        } catch let error as CalculatorEvaluationError {
+            print("error: \(error)")
+        } catch {
+            print("internal error: \(error)")
+        }
+    }
+
+    private static func formatParallelReport(
+        _ report: ParallelEvaluationReport
+    ) -> String {
+        let elapsedMs = Double(report.elapsedNanos) / 1_000_000.0
+        let elapsedDisplay = String(format: "%.3fms", elapsedMs)
+        return "forks=\(report.forkPoints) evals=\(report.nodeEvaluations) cacheHits=\(report.cacheHits) peakConcurrency=\(report.maxObservedConcurrency) elapsed=\(elapsedDisplay)"
     }
 
     private static func printTokenAtOffset(

@@ -52,22 +52,27 @@ public struct CalculatorEvaluationStats: Sendable, Equatable {
 
 /// A single entry surfaced by `CalculatorSession.cachedValues()`. Pairs
 /// the byte range of an expression node with its memoized evaluation
-/// result and the order it was first computed in.
+/// result and the order it was first computed in. `parallelOrder`
+/// reflects the most recent ``CalculatorSession/evaluateInParallel()``
+/// pass, if any.
 public struct CalculatorCachedValue: Sendable, Equatable {
     public let range: TextRange
     public let value: CalculatorValue
     public let evaluationOrder: Int?
+    public let parallelOrder: Int?
     public let valueKind: CalculatorValueKind?
 
     public init(
         range: TextRange,
         value: CalculatorValue,
         evaluationOrder: Int?,
+        parallelOrder: Int? = nil,
         valueKind: CalculatorValueKind?
     ) {
         self.range = range
         self.value = value
         self.evaluationOrder = evaluationOrder
+        self.parallelOrder = parallelOrder
         self.valueKind = valueKind
     }
 }
