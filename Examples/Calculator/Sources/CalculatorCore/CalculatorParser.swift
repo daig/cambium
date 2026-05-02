@@ -1,3 +1,58 @@
+// CalculatorParser.swift
+//
+// Recursive-descent parser driving `GreenTreeBuilder`. This file is the
+// densest demonstration of `CambiumBuilder` in the example.
+//
+// # Parsing strategy
+//
+// Pratt-style precedence climbing: `parseExpression(minPrecedence:)`
+// calls `parsePrefix()` for the left operand and then repeatedly
+// consumes a binary operator + a higher-precedence right operand. Each
+// open node is wrapped retroactively via `BuilderCheckpoint`:
+//
+//   1. `let cp = builder.checkpoint()` records the current builder
+//      state.
+//   2. `try parsePrefix()` and any subsequent operator/operand tokens
+//      are appended directly into the surrounding frame.
+//   3. When we decide we want a binaryExpr, `startNode(at: cp,
+//      .binaryExpr)` pulls every child appended since `cp` into a new
+//      frame. This is how cstree-style trees encode left-recursive
+//      productions cheaply.
+//
+// # Error recovery
+//
+// The parser never fails. It produces a tree even for malformed input,
+// using two sentinel kinds:
+//
+//   - `.missing` (a `missingNode`): a structurally-required expression
+//     that wasn't present (e.g., the rhs of a trailing `+`). Length
+//     zero; carries no source bytes.
+//   - `.error` (a node wrapping the offending token): an unexpected
+//     token consumed in place. Wrapped retroactively at a checkpoint
+//     so the bad bytes still appear in the round-trip text.
+//
+// Either way the parser logs a `Diagnostic` so the caller can render
+// "expected ')'" / "invalid character '@'" alongside the source range,
+// while the tree itself stays well-formed for traversal and editing.
+//
+// # Incremental subtree reuse
+//
+// On reparse, the session hands the parser a `previousTree` plus the
+// edits that produced the new source. At each prefix entry point
+// `tryReusePrefix(at:)` translates the parser's NEW byte offset to OLD
+// coordinates (via `mapNewOffsetToOld(_:edits:)`), asks the
+// `ReuseOracle` for a matching subtree of one of the *atomic* kinds
+// (`.groupExpr`, `.roundCallExpr`, `.unaryExpr`, `.realExpr`,
+// `.integerExpr`), verifies the new lexer's tokens align to the
+// candidate's byte length, and splices it in via `reuseSubtree(_:)`.
+//
+// `.binaryExpr` is deliberately excluded from the reusable set: its
+// precedence context is encoded by the *caller's* `minPrecedence`, not
+// by the subtree itself, so splicing one in at the wrong precedence
+// would silently change associativity. A more aggressive strategy
+// (root-level only, or with a precedence check at the splice site) is
+// possible but not done here.
+
 import Cambium
 
 /// Bundles the noncopyable build result with the diagnostics array. Used as

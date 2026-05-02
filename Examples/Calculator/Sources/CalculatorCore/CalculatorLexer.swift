@@ -78,7 +78,7 @@ struct CalculatorLexer {
 
                 var kind = LexedTokenKind.number
                 if index < input.endIndex,
-                   input[index].singleASCIIValue == 0x2e
+                   input[index].asciiValue == 0x2e
                 {
                     let dotIndex = index
                     var afterDot = dotIndex
@@ -123,7 +123,7 @@ struct CalculatorLexer {
             input.formIndex(after: &index)
             let text = String(input[start..<index])
             let kind: LexedTokenKind
-            switch character.singleASCIIValue {
+            switch character.asciiValue {
             case 0x2b:
                 kind = .plus
             case 0x2d:
@@ -164,21 +164,20 @@ struct CalculatorLexer {
 
 private extension Character {
     var isCalculatorDigit: Bool {
-        singleASCIIValue.map { 0x30...0x39 ~= $0 } ?? false
+        asciiValue.map { 0x30...0x39 ~= $0 } ?? false
     }
 
+    /// ASCII space, tab, newline, or carriage return. The Calculator
+    /// grammar is ASCII-only; accepting Unicode whitespace here would
+    /// mean operators recognized via `Character.asciiValue` and trivia
+    /// recognized via `Unicode.Scalar.Properties.isWhitespace` reach
+    /// inconsistent conclusions about the same input.
     var isCalculatorWhitespace: Bool {
-        unicodeScalars.allSatisfy { $0.properties.isWhitespace }
+        guard let value = asciiValue else { return false }
+        return value == 0x20 || value == 0x09 || value == 0x0a || value == 0x0d
     }
 
     var isCalculatorLetter: Bool {
-        singleASCIIValue.map { (0x41...0x5a ~= $0) || (0x61...0x7a ~= $0) } ?? false
-    }
-
-    var singleASCIIValue: UInt32? {
-        guard unicodeScalars.count == 1, let scalar = unicodeScalars.first, scalar.isASCII else {
-            return nil
-        }
-        return scalar.value
+        asciiValue.map { (0x41...0x5a ~= $0) || (0x61...0x7a ~= $0) } ?? false
     }
 }
