@@ -24,8 +24,6 @@ struct LexedToken: Sendable, Equatable {
 struct CalculatorLexer {
     var input: String
 
-    /// Tokenize `input`, always appending a trailing `.eof` so the parser
-    /// can rely on a sentinel.
     func tokenize() -> [LexedToken] {
         []
     }

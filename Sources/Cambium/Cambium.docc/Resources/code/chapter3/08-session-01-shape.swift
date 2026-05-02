@@ -35,8 +35,8 @@ public final class CalculatorSession {
         try parser.parse()
         let output = try parser.finishBuild()
 
-        // Order matters: read snapshot before consuming the build's
-        // context.
+        // Read the snapshot before consuming the build for its context.
+        // Order matters: `intoContext()` is `consuming`.
         let tree = output.build.snapshot.makeSyntaxTree().intoShared()
         let nextContext = output.build.intoContext()
 

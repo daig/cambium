@@ -28,8 +28,6 @@ struct CalculatorParser: ~Copyable {
             try builder.finishNode()
 
         case .realNumber:
-            // Real literals follow the same shape as integers — only the
-            // node and token kinds differ.
             builder.startNode(.realExpr)
             try builder.token(.realNumber, text: current.text)
             advance()

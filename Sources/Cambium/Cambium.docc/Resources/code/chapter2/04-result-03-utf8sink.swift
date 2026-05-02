@@ -76,8 +76,7 @@ public extension CalculatorParseResult {
                 }
             }
         } catch {
-            // FNV1aHasher.write does not throw; this branch is
-            // unreachable. Crash loudly if the contract changes.
+            // FNV1aHasher.write does not throw; this branch is unreachable.
             preconditionFailure("FNV1aHasher.write threw unexpectedly: \(error)")
         }
         return hasher.hash

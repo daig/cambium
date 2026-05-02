@@ -91,8 +91,6 @@ public final class CalculatorSession {
         previousTree.withRoot { oldRoot in
             newTree.withRoot { newRoot in
                 for reuse in witness.reusedSubtrees {
-                    // `withDescendant(atPath:_:)` walks an absolute
-                    // path from the root.
                     _ = oldRoot.withDescendant(atPath: reuse.oldPath) { oldReuseRoot in
                         oldReuseRoot.forEachDescendant(includingSelf: true) { oldNode in
                             let oldHandle = oldNode.makeHandle()

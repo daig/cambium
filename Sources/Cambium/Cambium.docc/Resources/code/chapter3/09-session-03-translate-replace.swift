@@ -91,8 +91,6 @@ public final class CalculatorSession {
         previousTree.withRoot { oldRoot in
             newTree.withRoot { newRoot in
                 for reuse in witness.reusedSubtrees {
-                    // `withDescendant(atPath:_:)` walks an absolute
-                    // path from the root.
                     _ = oldRoot.withDescendant(atPath: reuse.oldPath) { oldReuseRoot in
                         oldReuseRoot.forEachDescendant(includingSelf: true) { oldNode in
                             let oldHandle = oldNode.makeHandle()
@@ -139,7 +137,6 @@ public final class CalculatorSession {
                         guard let value = snapshot[oldKey] else { return }
 
                         let path = oldNode.childIndexPath()
-                        // Only `.unchanged` paths are safe to carry.
                         guard case .unchanged = witness.classify(path: path) else {
                             return
                         }
@@ -152,7 +149,6 @@ public final class CalculatorSession {
                     }
                 }
 
-                // Seed the new literal with its known value.
                 _ = newRoot.withDescendant(atPath: witness.replacedPath) { node in
                     let key = calculatorEvaluationCacheKey(
                         for: node.makeHandle().identity

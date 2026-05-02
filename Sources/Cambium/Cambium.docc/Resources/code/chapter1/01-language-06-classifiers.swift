@@ -36,8 +36,6 @@ public enum CalculatorLanguage: SyntaxLanguage {
     public static let serializationID = "org.cambium.examples.calculator"
     public static let serializationVersion: UInt32 = 1
 
-    // Whitespace is the only trivia kind in this grammar; trivia tokens
-    // are still stored on the tree but are skipped by the typed AST.
     public static func isTrivia(_ kind: CalculatorKind) -> Bool {
         kind == .whitespace
     }

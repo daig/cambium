@@ -14,8 +14,6 @@ struct CalculatorParser: ~Copyable {
     mutating func parse() throws {
         builder.startNode(.root)
         try consumeTrivia()
-        // Replace the bare `parsePrefix()` call with a precedence-aware
-        // expression parser. `minPrecedence: 0` accepts any operator.
         try parseExpression(minPrecedence: 0)
         try consumeTrivia()
         try builder.finishNode()
@@ -63,8 +61,6 @@ struct CalculatorParser: ~Copyable {
             builder.startNode(.groupExpr)
             try builder.staticToken(.leftParen)
             try consumeTrivia()
-            // The inner of a group is a full expression — recurse via
-            // `parseExpression` so `(1 + 2)` works.
             try parseExpression(minPrecedence: 0)
             try consumeTrivia()
             try builder.staticToken(.rightParen)

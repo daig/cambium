@@ -8,8 +8,6 @@ public func evaluateCalculatorTree(
 }
 
 internal struct CalculatorEvaluator {
-    /// Open the tree, project the root through `RootSyntax`, and
-    /// evaluate the (single) root expression.
     mutating func evaluateTree(
         _ tree: SharedSyntaxTree<CalculatorLanguage>
     ) throws -> CalculatorValue {
@@ -84,8 +82,6 @@ internal struct CalculatorEvaluator {
         }
         switch try evaluate(operand) {
         case .integer(let value):
-            // Negation of `Int64.min` overflows; we surface that as a
-            // structured error rather than crashing.
             let result = Int64(0).subtractingReportingOverflow(value)
             guard !result.overflow else {
                 throw CalculatorEvaluationError.overflow(expression.range)

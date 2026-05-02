@@ -68,8 +68,6 @@ public extension CalculatorKind {
 }
 
 extension CalculatorKind {
-    /// Pratt precedence for binary operators. `+` and `-` bind less
-    /// tightly than `*` and `/`; non-operator kinds return `nil`.
     var binaryPrecedence: Int? {
         switch self {
         case .plus, .minus: 1

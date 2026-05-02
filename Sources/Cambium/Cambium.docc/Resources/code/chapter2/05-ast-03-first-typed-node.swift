@@ -54,7 +54,6 @@ public struct CalculatorTokenSyntax: Sendable, Hashable {
 
 @CambiumSyntaxNode(CalculatorKind.self, for: .integerExpr)
 public struct IntegerExprSyntax: CalculatorSyntaxNode {
-    /// The digit token that holds the literal's text.
     public var literal: CalculatorTokenSyntax? {
         firstToken(kind: .number)
     }
@@ -67,8 +66,6 @@ public struct IntegerExprSyntax: CalculatorSyntaxNode {
 }
 
 internal extension CalculatorSyntaxNode {
-    /// First direct token child whose kind matches `kind`. The
-    /// borrowed-cursor scope ensures iteration is allocation-free.
     func firstToken(kind: CalculatorKind) -> CalculatorTokenSyntax? {
         syntax.withCursor { node in
             var result: CalculatorTokenSyntax?

@@ -31,7 +31,6 @@ struct CalculatorParser: ~Copyable {
         self.incremental = incremental
     }
 
-    /// One-shot init for callers that don't need session-level state.
     init(input: String) {
         self.init(
             input: input,
@@ -249,8 +248,6 @@ private extension LexedToken {
     }
 }
 
-/// One-shot parse: convenient when callers do not need
-/// session-level state (incremental reuse, evaluation caching).
 public func parseCalculator(_ input: String) throws -> CalculatorParseResult {
     var parser = CalculatorParser(input: input)
     try parser.parse()

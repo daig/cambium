@@ -8,8 +8,6 @@ public func evaluateCalculatorTree(
 }
 
 internal struct CalculatorEvaluator {
-    /// Open the tree, project the root through `RootSyntax`, and
-    /// evaluate the (single) root expression.
     mutating func evaluateTree(
         _ tree: SharedSyntaxTree<CalculatorLanguage>
     ) throws -> CalculatorValue {

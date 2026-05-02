@@ -52,7 +52,6 @@ public struct CalculatorTokenSyntax: Sendable, Hashable {
     }
 }
 
-/// The four binary operators in the Calculator grammar.
 public enum CalculatorBinaryOperator: Sendable, Hashable {
     case add, subtract, multiply, divide
 
@@ -84,7 +83,6 @@ public struct CalculatorBinaryOperatorTokenSyntax: Sendable, Hashable {
 
 @CambiumSyntaxNode(CalculatorKind.self, for: .integerExpr)
 public struct IntegerExprSyntax: CalculatorSyntaxNode {
-    /// The digit token that holds the literal's text.
     public var literal: CalculatorTokenSyntax? {
         firstToken(kind: .number)
     }
@@ -98,7 +96,6 @@ public struct IntegerExprSyntax: CalculatorSyntaxNode {
 
 @CambiumSyntaxNode(CalculatorKind.self, for: .realExpr)
 public struct RealExprSyntax: CalculatorSyntaxNode {
-    /// The digit-and-dot token that holds the literal's text.
     public var literal: CalculatorTokenSyntax? {
         firstToken(kind: .realNumber)
     }
@@ -112,8 +109,6 @@ public struct RealExprSyntax: CalculatorSyntaxNode {
 
 @CambiumSyntaxNode(CalculatorKind.self, for: .unaryExpr)
 public struct UnaryExprSyntax: CalculatorSyntaxNode {
-    /// The operand expression. Resolved by walking the direct children
-    /// in source order; the parser only emits one expression child.
     public var operand: ExprSyntax? { expression(at: 0) }
 }
 
@@ -178,7 +173,6 @@ public struct RootSyntax: CalculatorSyntaxNode {
 }
 
 internal extension CalculatorSyntaxNode {
-    /// Every direct expression-shape child in source order.
     func expressionChildren() -> [ExprSyntax] {
         syntax.withCursor { node in
             var expressions: [ExprSyntax] = []
@@ -191,15 +185,12 @@ internal extension CalculatorSyntaxNode {
         }
     }
 
-    /// Index into the expression children. `0` is the leftmost.
     func expression(at index: Int) -> ExprSyntax? {
         let expressions = expressionChildren()
         guard index >= 0, index < expressions.count else { return nil }
         return expressions[index]
     }
 
-    /// First binary-operator token among direct children, paired with
-    /// its decoded operator.
     func binaryOperatorToken() -> CalculatorBinaryOperatorTokenSyntax? {
         guard let token = firstToken(where: { CalculatorBinaryOperator($0) != nil }) else {
             return nil
@@ -207,8 +198,6 @@ internal extension CalculatorSyntaxNode {
         return CalculatorBinaryOperatorTokenSyntax(token)
     }
 
-    /// First direct token child whose kind matches `kind`. The
-    /// borrowed-cursor scope ensures iteration is allocation-free.
     func firstToken(kind: CalculatorKind) -> CalculatorTokenSyntax? {
         firstToken(where: { $0 == kind })
     }

@@ -168,8 +168,6 @@ struct CalculatorParser: ~Copyable {
         let checkpoint = builder.checkpoint()
         guard current.kind != .eof else { return }
 
-        // Append the offending token through the dynamic-text path so
-        // its raw bytes survive in the tree.
         try builder.token(.invalid, text: current.text)
         advance()
         try builder.startNode(at: checkpoint, .error)
