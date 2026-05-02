@@ -1,5 +1,3 @@
-// CalculatorTypedAST.swift
-
 import Cambium
 import CambiumSyntaxMacros
 
@@ -26,9 +24,6 @@ public extension CalculatorSyntaxNode {
     }
 }
 
-/// Typed wrapper for a single token. Surfaces the token's kind, range,
-/// and text without forcing callers to open a `withCursor` scope at
-/// every read site.
 public struct CalculatorTokenSyntax: Sendable, Hashable {
     public let syntax: SyntaxTokenHandle<CalculatorLanguage>
 
@@ -57,12 +52,6 @@ public struct CalculatorTokenSyntax: Sendable, Hashable {
     }
 }
 
-/// `IntegerExprSyntax` wraps every node whose kind is `.integerExpr`.
-///
-/// The ``CambiumSyntaxMacros/CambiumSyntaxNode(_:for:)`` macro
-/// generates the boilerplate: the `kind` constant, the stored `syntax`
-/// handle, and the unchecked initializer the protocol requires. Only
-/// the typed accessors are hand-written.
 @CambiumSyntaxNode(CalculatorKind.self, for: .integerExpr)
 public struct IntegerExprSyntax: CalculatorSyntaxNode {
     /// The digit token that holds the literal's text.

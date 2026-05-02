@@ -1,5 +1,3 @@
-// CalculatorParser.swift
-
 import Cambium
 
 struct CalculatorParser: ~Copyable {
@@ -31,10 +29,6 @@ struct CalculatorParser: ~Copyable {
             try parseExpression(minPrecedence: 0)
         }
 
-        // Anything left over after a complete expression is unexpected.
-        // Wrap each stray token in an `error` node so the bytes still
-        // appear in the round-trip text and the surrounding tree stays
-        // well-formed.
         try consumeTrivia()
         while current.kind != .eof {
             diagnostics.append(Diagnostic(
@@ -103,10 +97,6 @@ struct CalculatorParser: ~Copyable {
             try parseRoundCall()
 
         case .invalid:
-            // Lexer-level garbage. Wrap the offending token in an
-            // `error` node and emit a diagnostic; downstream tree
-            // walks see a syntactically well-formed but semantically
-            // marked region.
             diagnostics.append(Diagnostic(
                 range: current.range,
                 message: "invalid character '\(current.text)'"
@@ -174,10 +164,6 @@ struct CalculatorParser: ~Copyable {
         try builder.finishNode()
     }
 
-    /// Consume the current token and wrap it in an `.error` node. Uses
-    /// `startNode(at:_:)` to retroactively reparent the just-emitted
-    /// token under the error frame, the same retroactive-wrapping
-    /// pattern as binary expressions.
     private mutating func parseUnexpectedTokenAsError() throws {
         let checkpoint = builder.checkpoint()
         guard current.kind != .eof else { return }

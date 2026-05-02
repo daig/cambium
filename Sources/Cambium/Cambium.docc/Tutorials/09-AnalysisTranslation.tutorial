@@ -26,8 +26,8 @@
             type per node.
 
             Both serialize concurrent reads and writes internally,
-            so they're suitable for sharing across structured-
-            concurrent evaluation passes (Chapter 4).
+            so they're suitable for sharing across
+            structured-concurrent evaluation passes (Chapter 4).
         }
 
         @Steps {

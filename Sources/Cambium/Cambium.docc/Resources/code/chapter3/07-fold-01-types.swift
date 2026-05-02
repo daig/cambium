@@ -1,10 +1,5 @@
-// CalculatorFold.swift
-
 import Cambium
 
-/// One subtree replacement applied during folding. Carries the
-/// witness returned by `replacing(_:with:context:)` so consumers can
-/// translate references through the change.
 public struct FoldStep: Sendable {
     public let oldKind: CalculatorKind
     public let newKind: CalculatorKind

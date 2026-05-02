@@ -1,20 +1,11 @@
-// CalculatorParallelParser.swift
-
 import Cambium
 
 public struct ParallelParseReport: Sendable {
     /// One parsed tree per input expression, in input order.
     public let trees: [SharedSyntaxTree<CalculatorLanguage>]
 
-    /// The interner that backed every worker. Holding this is what
-    /// lets a downstream master builder splice each `trees[i]` via
-    /// ``CambiumBuilder/GreenTreeBuilder/reuseSubtree(_:)`` on the
-    /// ``CambiumBuilder/SubtreeReuseOutcome/direct`` fast path.
     public let interner: SharedTokenInterner
 
-    /// Number of distinct interner keys used across all workers.
-    /// Lower-than-`totalDynamicTokens` indicates dedup actually
-    /// happened.
     public let internerKeySpaceUsed: Int
     public let totalDynamicTokens: Int
 }
@@ -29,10 +20,6 @@ public func parseCalculatorExpressionsInParallel(
     ) { group in
         for (index, source) in expressions.enumerated() {
             group.addTask {
-                // Each worker gets its own `GreenTreeContext`, so
-                // its `GreenNodeCache` is local — but the interner
-                // is shared, so dynamic-token vocabulary is unified
-                // from the moment of birth.
                 let context = GreenTreeContext<CalculatorLanguage>(
                     interner: interner,
                     policy: .documentLocal
@@ -53,9 +40,6 @@ public func parseCalculatorExpressionsInParallel(
             }
         }
 
-        // Reassemble in input order. Task-group results arrive in
-        // completion order, so we re-index by the original
-        // position.
         var ordered = Array<SharedSyntaxTree<CalculatorLanguage>?>(
             repeating: nil, count: expressions.count
         )
@@ -73,8 +57,45 @@ public func parseCalculatorExpressionsInParallel(
     )
 }
 
-// Reporting helpers — walk each tree's green nodes via
-// `node.child(at:)`, examine `token.textStorage`, and tally
-// `.interned` vs `.staticText`. Implementations omitted for brevity.
-private func countDynamicTokens(in tree: SharedSyntaxTree<CalculatorLanguage>) -> Int { 0 }
-private func countInternerKeyOccupancy(across trees: [SharedSyntaxTree<CalculatorLanguage>]) -> Int { 0 }
+private func countDynamicTokens(
+    in tree: SharedSyntaxTree<CalculatorLanguage>
+) -> Int {
+    var count = 0
+    walkGreenTokens(in: tree.rootGreen) { token in
+        switch token.textStorage {
+        case .interned, .ownedLargeText:
+            count += 1
+        case .staticText, .missing:
+            break
+        }
+    }
+    return count
+}
+
+private func countInternerKeyOccupancy(
+    across trees: [SharedSyntaxTree<CalculatorLanguage>]
+) -> Int {
+    var seen: Set<UInt32> = []
+    for tree in trees {
+        walkGreenTokens(in: tree.rootGreen) { token in
+            if case .interned(let key) = token.textStorage {
+                seen.insert(key.rawValue)
+            }
+        }
+    }
+    return seen.count
+}
+
+private func walkGreenTokens(
+    in node: GreenNode<CalculatorLanguage>,
+    visit: (GreenToken<CalculatorLanguage>) -> Void
+) {
+    for childIndex in 0..<node.childCount {
+        switch node.child(at: childIndex) {
+        case .node(let child):
+            walkGreenTokens(in: child, visit: visit)
+        case .token(let token):
+            visit(token)
+        }
+    }
+}

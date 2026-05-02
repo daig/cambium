@@ -1,5 +1,3 @@
-// CalculatorEvaluator.swift
-
 import Cambium
 
 public func evaluateCalculatorTree(
@@ -44,7 +42,6 @@ internal struct CalculatorEvaluator {
         }
     }
 
-    // Per-kind helpers filled in by the next steps.
     private mutating func evaluateInteger(_ expression: IntegerExprSyntax) throws -> CalculatorValue { fatalError() }
     private mutating func evaluateReal(_ expression: RealExprSyntax) throws -> CalculatorValue { fatalError() }
     private mutating func evaluateUnary(_ expression: UnaryExprSyntax) throws -> CalculatorValue { fatalError() }

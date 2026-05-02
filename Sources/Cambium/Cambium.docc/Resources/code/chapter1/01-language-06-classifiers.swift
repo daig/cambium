@@ -1,5 +1,3 @@
-// CalculatorLanguage.swift
-
 import Cambium
 import CambiumSyntaxMacros
 
@@ -44,9 +42,6 @@ public enum CalculatorLanguage: SyntaxLanguage {
         kind == .whitespace
     }
 
-    // The default `isNode` / `isToken` classifiers treat any kind with
-    // static text as a token, which would misclassify our dynamic-text
-    // `number` and `realNumber` kinds. Override both to be explicit.
     public static func isNode(_ kind: CalculatorKind) -> Bool {
         switch kind {
         case .root, .integerExpr, .realExpr, .unaryExpr, .binaryExpr,

@@ -1,5 +1,3 @@
-// CalculatorParser.swift
-
 import Cambium
 
 struct CalculatorParser: ~Copyable {
@@ -22,9 +20,6 @@ struct CalculatorParser: ~Copyable {
     private mutating func parsePrefix() throws {
         switch current.kind {
         case .number:
-            // Open an `integerExpr` node, append the digit token's text
-            // through the dynamic-text path, close. The `text:` argument
-            // lands in the builder's interner so two `42`s share storage.
             builder.startNode(.integerExpr)
             try builder.token(.number, text: current.text)
             advance()

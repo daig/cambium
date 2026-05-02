@@ -1,5 +1,3 @@
-// CalculatorParser.swift
-
 import Cambium
 
 struct CalculatorParser: ~Copyable {
@@ -13,18 +11,13 @@ struct CalculatorParser: ~Copyable {
         self.builder = GreenTreeBuilder<CalculatorLanguage>()
     }
 
-    /// Open the root, parse one expression, close the root. Every parse
-    /// is bracketed by exactly one matched `startNode` / `finishNode`
-    /// pair on the root kind — Cambium would reject an unmatched stack.
     mutating func parse() throws {
         builder.startNode(.root)
         try parsePrefix()
         try builder.finishNode()
     }
 
-    private mutating func parsePrefix() throws {
-        // Filled in by the next steps.
-    }
+    private mutating func parsePrefix() throws {}
 
     private var current: LexedToken {
         tokens[currentIndex]

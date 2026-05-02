@@ -6,7 +6,7 @@
         named errors at decode time rather than silently malformed
         trees.
 
-        Editor warm-restart is the canonical use case: persist the
+        Editor warm restart is the canonical use case: persist the
         last-good tree to disk on shutdown, decode it on launch, and
         adopt it as the session's current tree without re-parsing
         the source. The same mechanism backs `:save` and `:load` in

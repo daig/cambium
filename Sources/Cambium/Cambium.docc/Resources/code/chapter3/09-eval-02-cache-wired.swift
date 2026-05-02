@@ -1,15 +1,7 @@
-// CalculatorEvaluator.swift
-
 import Cambium
 
-/// Namespace for analysis cache keys belonging to the calculator
-/// evaluator. The same key namespace must be used by every consumer
-/// that wants to read these entries.
 internal let calculatorEvaluationNamespace = "com.cambium.examples.calculator.eval"
 
-/// `SyntaxDataKey<Value>` slots a typed payload into a
-/// `SyntaxMetadataStore`. Equality is by string name, so namespace
-/// the key strings to keep unrelated passes from colliding.
 internal let calculatorEvaluationOrderKey = SyntaxDataKey<Int>(
     "com.cambium.examples.calculator.eval.order"
 )
@@ -17,9 +9,6 @@ internal let calculatorEvaluationKindKey = SyntaxDataKey<CalculatorValueKind>(
     "com.cambium.examples.calculator.eval.value-kind"
 )
 
-/// Build the key the evaluator will use for a node's cached value.
-/// Pairing the per-tree `SyntaxNodeIdentity` with a namespace lets a
-/// single cache hold values from many passes without collision.
 internal func calculatorEvaluationCacheKey(
     for identity: SyntaxNodeIdentity
 ) -> AnalysisCacheKey<CalculatorLanguage> {
@@ -70,9 +59,6 @@ internal struct CalculatorEvaluator {
         }
     }
 
-    /// Recursive expression entry. Cache lookup happens here, so
-    /// every recursive call benefits from prior memoization within
-    /// the same session.
     mutating func evaluate(_ expression: ExprSyntax) throws -> CalculatorValue {
         let handle = expression.syntax
         let key = calculatorEvaluationCacheKey(for: handle.identity)
@@ -97,11 +83,6 @@ internal struct CalculatorEvaluator {
         return value
     }
 
-    /// Record per-evaluation sidecar data: the order this node was
-    /// first visited, and the value kind it produced. The
-    /// `SyntaxMetadataStore` serializes its own writes via an
-    /// internal mutex, so multi-task evaluators can share a store
-    /// without extra synchronization.
     private mutating func recordMetadata(
         _ value: CalculatorValue,
         on handle: SyntaxNodeHandle<CalculatorLanguage>

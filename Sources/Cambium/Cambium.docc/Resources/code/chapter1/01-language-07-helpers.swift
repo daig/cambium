@@ -1,5 +1,3 @@
-// CalculatorLanguage.swift
-
 import Cambium
 import CambiumSyntaxMacros
 
@@ -56,10 +54,6 @@ public enum CalculatorLanguage: SyntaxLanguage {
         !isNode(kind)
     }
 }
-
-// Grammar-specific helpers. These do not participate in `SyntaxLanguage`
-// — they are conveniences the parser and the typed AST will use to
-// interpret the kind enum.
 
 public extension CalculatorKind {
     var isExpressionNode: Bool {

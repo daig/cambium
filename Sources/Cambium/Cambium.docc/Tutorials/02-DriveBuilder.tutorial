@@ -6,8 +6,8 @@
         / `finishNode` calls and produces a green tree whose structure
         mirrors the calls one-for-one.
 
-        In this tutorial you build the calculator parser's literal-and-
-        group core: integer literals, real literals, parenthesized
+        In this tutorial you build the calculator parser's
+        literal-and-group core: integer literals, real literals, parenthesized
         groups, and trivia. Operator precedence and error recovery come
         in the next tutorial; here the focus is the *vocabulary* of the
         builder API and the lifecycle that turns a parse into a

@@ -8,7 +8,7 @@
         text is exposed as a chunk-streaming view rather than a
         materialized `String`.
 
-        In this tutorial you implement six REPL commands — `:tree`,
+        In this tutorial you implement nine REPL commands — `:tree`,
         `:at`, `:cover`, `:contains`, `:find`, `:slice`, `:hash`,
         `:nodes`, `:tokens` — each one a different shape of borrowed
         or owned tree access.

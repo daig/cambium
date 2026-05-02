@@ -1,5 +1,3 @@
-// CalculatorParser.swift
-
 import Cambium
 
 struct CalculatorParser: ~Copyable {

@@ -1,5 +1,3 @@
-// CalculatorLanguage.swift
-
 import Cambium
 import CambiumSyntaxMacros
 
@@ -10,9 +8,6 @@ public enum CalculatorKind: UInt32, Sendable {
     case invalid = 3
     case realNumber = 4
 
-    // Static-text tokens always render to the same bytes; `@StaticText`
-    // teaches the macro to fold the literal into `staticText(for:)` so
-    // the parser passes the kind only — no per-call-site string.
     @StaticText("+")
     case plus = 10
     @StaticText("-")

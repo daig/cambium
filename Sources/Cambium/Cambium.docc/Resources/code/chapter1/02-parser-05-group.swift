@@ -1,5 +1,3 @@
-// CalculatorParser.swift
-
 import Cambium
 
 struct CalculatorParser: ~Copyable {
@@ -36,10 +34,6 @@ struct CalculatorParser: ~Copyable {
             try builder.finishNode()
 
         case .leftParen:
-            // A parenthesized expression. `staticToken` emits the
-            // operator's text from the language definition — no
-            // string repetition at the call site, and the builder
-            // throws if the kind has no static text registered.
             builder.startNode(.groupExpr)
             try builder.staticToken(.leftParen)
             try consumeTrivia()

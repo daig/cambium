@@ -92,8 +92,8 @@
     @Section(title: "Recurse into compound expressions") {
         @ContentAndMedia {
             The remaining four cases — unary, group, round-call,
-            binary — recurse into `evaluate(_:)` for their sub-
-            expressions. The code stays close to the structure of the
+            binary — recurse into `evaluate(_:)` for their
+            subexpressions. The code stays close to the structure of the
             grammar because the typed accessors are kind-specific.
         }
 

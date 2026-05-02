@@ -1,5 +1,3 @@
-// CalculatorParser.swift
-
 import Cambium
 
 struct CalculatorParser: ~Copyable {
@@ -21,10 +19,6 @@ struct CalculatorParser: ~Copyable {
         try builder.finishNode()
     }
 
-    /// Drain the parser into a `SyntaxTree`. The `consuming` qualifier
-    /// is what lets `builder.finish()` move out of the noncopyable
-    /// `CalculatorParser` — Cambium's builder is `~Copyable` for the
-    /// same reason.
     consuming func finish() throws -> SyntaxTree<CalculatorLanguage> {
         let result = try builder.finish()
         return result.snapshot.makeSyntaxTree()
@@ -80,10 +74,6 @@ struct CalculatorParser: ~Copyable {
     }
 }
 
-/// One-shot parse: convenient when callers do not need session-level
-/// state (incremental reuse, evaluation caching, fold). Returns a
-/// `~Copyable` `SyntaxTree` — promote it to `SharedSyntaxTree` if you
-/// need to publish it across actors or store it long-term.
 public func parseCalculator(_ input: String) throws -> SyntaxTree<CalculatorLanguage> {
     var parser = CalculatorParser(input: input)
     try parser.parse()

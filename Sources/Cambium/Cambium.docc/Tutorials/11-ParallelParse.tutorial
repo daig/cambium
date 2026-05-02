@@ -7,7 +7,7 @@
         share token-text vocabulary and the green-node namespace.
 
         ``CambiumBuilder/SharedTokenInterner`` is the answer.
-        Externalize the interner, hand each worker a per-thread
+        Externalize the interner, hand each worker a per-worker
         ``CambiumBuilder/GreenTreeContext`` bound to that interner,
         and every cross-context splice into a master builder takes
         the ``CambiumBuilder/SubtreeReuseOutcome/direct`` fast path
@@ -23,8 +23,8 @@
 
             Two metrics surface dedup effectiveness: total dynamic
             tokens minted across all workers vs. distinct interner
-            keys used. A small ratio is the *whole point* of
-            sharing the interner.
+            keys used. The point of sharing the interner is for the
+            distinct-key count to stay small relative to total tokens.
         }
 
         @Steps {
@@ -33,7 +33,7 @@
                 ``CambiumBuilder/SharedTokenInterner`` is the
                 load-bearing handle — clients can keep parsing
                 against the same vocabulary, splice into other
-                builders, or persist it for editor warm-restart.
+                builders, or persist it for editor warm restart.
 
                 @Code(name: "CalculatorParallelParser.swift", file: "11-pparse-01-shape.swift")
             }
@@ -115,8 +115,8 @@
                 identity is preserved, no remap work.
 
                 @Justification(reaction: "That's right") {
-                    Sharing the interner is the externalized-
-                    interning pattern's central pay-off: parallel
+                    Sharing the interner is the externalized interning
+                    pattern's central pay-off: parallel
                     parses fold into one logical tree without any
                     re-interning at merge time.
                 }

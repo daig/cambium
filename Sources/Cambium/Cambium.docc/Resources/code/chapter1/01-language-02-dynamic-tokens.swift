@@ -1,5 +1,3 @@
-// CalculatorLanguage.swift
-
 import Cambium
 import CambiumSyntaxMacros
 

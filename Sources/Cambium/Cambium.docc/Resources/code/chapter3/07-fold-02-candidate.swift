@@ -1,10 +1,5 @@
-// CalculatorFold.swift
-
 import Cambium
 
-/// One subtree replacement applied during folding. Carries the
-/// witness returned by `replacing(_:with:context:)` so consumers can
-/// translate references through the change.
 public struct FoldStep: Sendable {
     public let oldKind: CalculatorKind
     public let newKind: CalculatorKind
@@ -40,17 +35,11 @@ internal struct FoldLiteral {
     var needsLeadingMinus: Bool
 }
 
-/// First foldable expression in `tree`, discovered by post-order
-/// walk. Children fold before their parents, so a single pass picks
-/// the innermost evaluable position.
 internal func firstFoldCandidate(
     in tree: SharedSyntaxTree<CalculatorLanguage>
 ) -> FoldCandidate? {
     tree.withRoot { root in
         var candidate: FoldCandidate?
-        // `walkPreorder` emits both `.enter` and `.leave` events.
-        // Acting on `.leave` gives us post-order: children visited
-        // before their parents.
         _ = root.walkPreorder { event in
             switch event {
             case .enter:
@@ -77,10 +66,6 @@ internal func firstFoldCandidate(
     }
 }
 
-/// Whether `expression` is foldable: every direct operand must
-/// already be a literal, in which case we evaluate it. Recursive
-/// folding happens by repeated passes — one fold per call until
-/// `firstFoldCandidate` returns `nil`.
 private func evaluatedValue(for expression: ExprSyntax) -> CalculatorValue? {
     switch expression {
     case .integer, .real:
@@ -113,9 +98,43 @@ private func makeLiteral(for value: CalculatorValue) -> FoldLiteral? {
         )
     case .real(let value):
         guard value.isFinite else { return nil }
-        // Real literal canonicalization elided for tutorial brevity.
-        return nil
+        let canonical = String(value)
+        guard isPlainDecimal(canonical) else { return nil }
+        let needsLeadingMinus = canonical.hasPrefix("-")
+        return FoldLiteral(
+            value: .real(value),
+            expressionKind: .realExpr,
+            tokenKind: .realNumber,
+            digitsText: needsLeadingMinus
+                ? String(canonical.dropFirst())
+                : canonical,
+            needsLeadingMinus: needsLeadingMinus
+        )
     }
+}
+
+private func isPlainDecimal(_ text: String) -> Bool {
+    var scalars = Array(text.unicodeScalars)
+    if scalars.first?.value == 0x2d {
+        scalars.removeFirst()
+    }
+    guard let dotIndex = scalars.firstIndex(where: { $0.value == 0x2e }),
+          dotIndex > scalars.startIndex,
+          dotIndex < scalars.index(before: scalars.endIndex)
+    else {
+        return false
+    }
+    for scalar in scalars[..<dotIndex] {
+        guard scalar.value >= 0x30, scalar.value <= 0x39 else {
+            return false
+        }
+    }
+    for scalar in scalars[scalars.index(after: dotIndex)...] {
+        guard scalar.value >= 0x30, scalar.value <= 0x39 else {
+            return false
+        }
+    }
+    return true
 }
 
 private extension ExprSyntax {

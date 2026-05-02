@@ -1,5 +1,3 @@
-// CalculatorLanguage.swift
-
 import Cambium
 import CambiumSyntaxMacros
 
@@ -25,10 +23,6 @@ public enum CalculatorKind: UInt32, Sendable {
     @StaticText("round")
     case round = 16
 
-    // Node kinds — internal categories the parser groups token children
-    // under. `root` is mandatory; the other kinds match expression shapes
-    // we will generate from the parser. `missing` and `error` are
-    // sentinels the parser emits when input is incomplete or unexpected.
     case root = 100
     case integerExpr = 101
     case unaryExpr = 102

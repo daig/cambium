@@ -1,5 +1,3 @@
-// CalculatorParser.swift
-
 import Cambium
 
 struct CalculatorParser: ~Copyable {
@@ -42,9 +40,6 @@ struct CalculatorParser: ~Copyable {
         }
     }
 
-    /// Append every leading `whitespace` token to the current frame.
-    /// Whitespace is trivia in this grammar, but trivia still belongs in
-    /// the tree so the parsed source round-trips byte-for-byte.
     private mutating func consumeTrivia() throws {
         while current.kind == .whitespace {
             try builder.token(.whitespace, text: current.text)

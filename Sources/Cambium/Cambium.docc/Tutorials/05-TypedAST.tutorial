@@ -105,7 +105,7 @@
                 case; `syntax`, `range`, and the `init?(_:)` failure
                 path all flow through the union uniformly.
 
-                Also add `RootSyntax` so callers can entered the typed
+                Also add `RootSyntax` so callers can enter the typed
                 world from `tree.rootHandle()`.
 
                 @Code(name: "CalculatorTypedAST.swift", file: "05-ast-05-expr-union.swift")
@@ -175,8 +175,8 @@
 
                 @Justification(reaction: "That's right") {
                     A typed wrapper is a *view* over the underlying
-                    CST. Storing children would defeat the borrowed-
-                    cursor model and double the memory footprint of
+                    CST. Storing children would defeat the
+                    borrowed-cursor model and double the memory footprint of
                     every parsed expression.
                 }
             }

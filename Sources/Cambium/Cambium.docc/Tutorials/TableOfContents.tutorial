@@ -2,11 +2,11 @@
     @Intro(title: "Build a Calculator with Cambium") {
         Cambium is a Swift-native concrete syntax tree library. This
         tutorial series walks you through building a small but
-        production-shaped calculator language end-to-end: a recursive-
-        descent parser that produces a lossless tree, a typed AST overlay,
+        production-shaped calculator language end-to-end: a
+        recursive-descent parser that produces a lossless tree, a typed AST overlay,
         an evaluator with memoized analysis, persistent edits with
-        identity-preserving witnesses, an incremental reparse loop, fork-
-        join evaluation across structured-concurrent tasks, parallel
+        identity-preserving witnesses, an incremental reparse loop,
+        fork-join evaluation across structured-concurrent tasks, parallel
         parsing with externalized interning, and on-disk serialization.
 
         Each chapter culminates in REPL commands you can try in the

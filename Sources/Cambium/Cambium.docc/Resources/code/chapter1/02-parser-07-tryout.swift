@@ -1,9 +1,3 @@
-// Demo.swift
-//
-// A small driver that exercises the parser. Print the round-tripped
-// text first to confirm the tree is lossless, then dump the kind/range
-// of each node and token.
-
 import Cambium
 
 let tree = try parseCalculator("(42)")

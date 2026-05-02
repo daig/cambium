@@ -204,7 +204,7 @@
                 The splice succeeded without copying any green nodes.
 
                 @Justification(reaction: "Try again") {
-                    Both `.direct` and `.remapped` produce a fully-
+                    Both `.direct` and `.remapped` produce a fully
                     spliced subtree. The distinction is whether
                     dynamic-token text had to be re-interned to
                     reach the new namespace.

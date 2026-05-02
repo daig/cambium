@@ -1,10 +1,5 @@
-// CalculatorFold.swift
-
 import Cambium
 
-/// One subtree replacement applied during folding. Carries the
-/// witness returned by `replacing(_:with:context:)` so consumers can
-/// translate references through the change.
 public struct FoldStep: Sendable {
     public let oldKind: CalculatorKind
     public let newKind: CalculatorKind
@@ -40,17 +35,11 @@ internal struct FoldLiteral {
     var needsLeadingMinus: Bool
 }
 
-/// First foldable expression in `tree`, discovered by post-order
-/// walk. Children fold before their parents, so a single pass picks
-/// the innermost evaluable position.
 internal func firstFoldCandidate(
     in tree: SharedSyntaxTree<CalculatorLanguage>
 ) -> FoldCandidate? {
     tree.withRoot { root in
         var candidate: FoldCandidate?
-        // `walkPreorder` emits both `.enter` and `.leave` events.
-        // Acting on `.leave` gives us post-order: children visited
-        // before their parents.
         _ = root.walkPreorder { event in
             switch event {
             case .enter:
@@ -77,10 +66,6 @@ internal func firstFoldCandidate(
     }
 }
 
-/// Whether `expression` is foldable: every direct operand must
-/// already be a literal, in which case we evaluate it. Recursive
-/// folding happens by repeated passes — one fold per call until
-/// `firstFoldCandidate` returns `nil`.
 private func evaluatedValue(for expression: ExprSyntax) -> CalculatorValue? {
     switch expression {
     case .integer, .real:
@@ -113,9 +98,43 @@ private func makeLiteral(for value: CalculatorValue) -> FoldLiteral? {
         )
     case .real(let value):
         guard value.isFinite else { return nil }
-        // Real literal canonicalization elided for tutorial brevity.
-        return nil
+        let canonical = String(value)
+        guard isPlainDecimal(canonical) else { return nil }
+        let needsLeadingMinus = canonical.hasPrefix("-")
+        return FoldLiteral(
+            value: .real(value),
+            expressionKind: .realExpr,
+            tokenKind: .realNumber,
+            digitsText: needsLeadingMinus
+                ? String(canonical.dropFirst())
+                : canonical,
+            needsLeadingMinus: needsLeadingMinus
+        )
     }
+}
+
+private func isPlainDecimal(_ text: String) -> Bool {
+    var scalars = Array(text.unicodeScalars)
+    if scalars.first?.value == 0x2d {
+        scalars.removeFirst()
+    }
+    guard let dotIndex = scalars.firstIndex(where: { $0.value == 0x2e }),
+          dotIndex > scalars.startIndex,
+          dotIndex < scalars.index(before: scalars.endIndex)
+    else {
+        return false
+    }
+    for scalar in scalars[..<dotIndex] {
+        guard scalar.value >= 0x30, scalar.value <= 0x39 else {
+            return false
+        }
+    }
+    for scalar in scalars[scalars.index(after: dotIndex)...] {
+        guard scalar.value >= 0x30, scalar.value <= 0x39 else {
+            return false
+        }
+    }
+    return true
 }
 
 private extension ExprSyntax {
@@ -127,9 +146,6 @@ private extension ExprSyntax {
     }
 }
 
-/// Bundles a `FoldStep` with the noncopyable context the next
-/// iteration will consume. Swift tuples can't yet hold `~Copyable`
-/// elements, so this struct fills the same role.
 internal struct FoldApplyOutput: ~Copyable {
     var step: FoldStep
     private var context: GreenTreeContext<CalculatorLanguage>
@@ -144,19 +160,11 @@ internal struct FoldApplyOutput: ~Copyable {
     }
 }
 
-/// Build the replacement subtree, splice it in, and return the
-/// resulting step plus the forwarded context. The context comes back
-/// because `replacing(_:with:context:)` consumes it; the caller will
-/// pass it to the next iteration.
 internal func applyFold(
     _ candidate: FoldCandidate,
     in tree: SharedSyntaxTree<CalculatorLanguage>,
     context: consuming GreenTreeContext<CalculatorLanguage>
 ) throws -> FoldApplyOutput {
-    // Build a tiny replacement tree using the same context the
-    // surrounding edit will splice into. Reusing the context keeps
-    // token-key namespace identity intact, so the splice takes the
-    // direct (non-remapping) path.
     var builder = GreenTreeBuilder<CalculatorLanguage>(context: consume context)
     builder.startNode(candidate.literal.expressionKind)
     if candidate.literal.needsLeadingMinus {
@@ -166,10 +174,6 @@ internal func applyFold(
     try builder.finishNode()
     let build = try builder.finish()
 
-    // The replacement is a `ResolvedGreenNode` — a green subtree
-    // bundled with the resolver that produced its tokens. The
-    // surrounding tree's context will splice it as-is when their
-    // namespaces match.
     let replacement = ResolvedGreenNode(
         root: build.root,
         resolver: build.resolver
@@ -196,9 +200,6 @@ internal func applyFold(
     return FoldApplyOutput(step: step, context: consume replacementContext)
 }
 
-/// Iteratively constant-fold `tree` until no foldable expression
-/// remains. Returns a `FoldReport` whose `steps` records every
-/// replacement applied in order.
 public func foldCalculatorTree(
     _ tree: SharedSyntaxTree<CalculatorLanguage>,
     context: consuming GreenTreeContext<CalculatorLanguage>
@@ -214,9 +215,6 @@ public func foldCalculatorTree(
             context: consume foldContext
         )
         let step = output.step
-        // The replacement consumed our context and handed back a new
-        // one bound to the same namespace. Reuse it for the next
-        // splice so green-node sharing carries across the pass.
         foldContext = output.intoContext()
         currentTree = step.newTree
         steps.append(step)

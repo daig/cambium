@@ -1,5 +1,3 @@
-// CalculatorParser.swift
-
 import Cambium
 
 struct CalculatorParser: ~Copyable {
@@ -80,10 +78,6 @@ struct CalculatorParser: ~Copyable {
             try consumeTrivia()
             try parseExpression(minPrecedence: 0)
             try consumeTrivia()
-            // Recover from a missing `)`. Emit a `missingToken` so the
-            // tree's structure stays well-formed (the `groupExpr` still
-            // has its closing slot filled), and record a diagnostic so
-            // the caller can report the location.
             if current.kind == .rightParen {
                 try builder.staticToken(.rightParen)
                 advance()

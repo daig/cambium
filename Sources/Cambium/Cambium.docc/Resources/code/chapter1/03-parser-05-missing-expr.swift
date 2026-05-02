@@ -1,5 +1,3 @@
-// CalculatorParser.swift
-
 import Cambium
 
 struct CalculatorParser: ~Copyable {
@@ -20,9 +18,6 @@ struct CalculatorParser: ~Copyable {
     mutating func parse() throws {
         builder.startNode(.root)
         try consumeTrivia()
-        // An empty document is a missing expression. Emit a structural
-        // placeholder so downstream tree consumers can still walk a
-        // well-formed root.
         if current.kind == .eof {
             diagnostics.append(Diagnostic(
                 range: current.range,
@@ -91,10 +86,6 @@ struct CalculatorParser: ~Copyable {
             try parseRoundCall()
 
         default:
-            // Anything else here is an expression position with no
-            // expression. Insert a `missing` node so the surrounding
-            // structure (a binary expression's RHS, a `round` call's
-            // argument, the root) still type-checks structurally.
             diagnostics.append(Diagnostic(
                 range: current.range,
                 message: "expected expression"

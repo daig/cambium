@@ -1,5 +1,3 @@
-// CalculatorParser.swift
-
 import Cambium
 
 struct CalculatorParser: ~Copyable {
@@ -62,9 +60,6 @@ struct CalculatorParser: ~Copyable {
             try builder.finishNode()
 
         case .minus:
-            // Unary minus binds tighter than any binary operator, so
-            // recurse with `prefixPrecedence` to keep `-1 + 2` parsing
-            // as `(-1) + 2` rather than `-(1 + 2)`.
             builder.startNode(.unaryExpr)
             try builder.staticToken(.minus)
             advance()
@@ -82,9 +77,6 @@ struct CalculatorParser: ~Copyable {
             try builder.finishNode()
 
         case .round:
-            // `round(expr)` is a prefix call form. The keyword and the
-            // parens are static-text tokens; the argument is a full
-            // expression so it can contain operators.
             builder.startNode(.roundCallExpr)
             try builder.staticToken(.round)
             advance()

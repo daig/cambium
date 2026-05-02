@@ -1,8 +1,3 @@
-// CalculatorParseResult.swift
-//
-// Lifted from CalculatorParser.swift into its own file. We grow it
-// here with query helpers built on the borrowed-cursor APIs.
-
 import Cambium
 
 public struct CalculatorParseResult: Sendable {
@@ -11,15 +6,6 @@ public struct CalculatorParseResult: Sendable {
 }
 
 public extension CalculatorParseResult {
-    /// What does the parser think about a single byte position?
-    /// `withTokenAtOffset` answers in three cases:
-    /// - `.none`: the offset is past EOF.
-    /// - `.single(token)`: the offset is strictly inside a token.
-    /// - `.between(left, right)`: the offset is at a token boundary.
-    ///
-    /// The closure-per-case shape forces the caller to address every
-    /// case. The cursors are borrowed; copy out only what you need
-    /// before the closure returns.
     func describeToken(at offset: TextSize) -> String {
         tree.withRoot { root in
             root.withTokenAtOffset(
@@ -35,10 +21,6 @@ public extension CalculatorParseResult {
         }
     }
 
-    /// What is the smallest node or token wholly covering `range`?
-    /// `withCoveringElement` walks down the tree and stops at the
-    /// element whose own range contains `range` but none of whose
-    /// children do.
     func describeCovering(_ range: TextRange) -> String? {
         tree.withRoot { root in
             root.withCoveringElement(range) { element in

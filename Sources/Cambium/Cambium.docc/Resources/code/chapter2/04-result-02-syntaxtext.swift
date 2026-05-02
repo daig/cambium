@@ -1,8 +1,3 @@
-// CalculatorParseResult.swift
-//
-// Lifted from CalculatorParser.swift into its own file. We grow it
-// here with query helpers built on the borrowed-cursor APIs.
-
 import Cambium
 
 public struct CalculatorParseResult: Sendable {
@@ -11,15 +6,6 @@ public struct CalculatorParseResult: Sendable {
 }
 
 public extension CalculatorParseResult {
-    /// What does the parser think about a single byte position?
-    /// `withTokenAtOffset` answers in three cases:
-    /// - `.none`: the offset is past EOF.
-    /// - `.single(token)`: the offset is strictly inside a token.
-    /// - `.between(left, right)`: the offset is at a token boundary.
-    ///
-    /// The closure-per-case shape forces the caller to address every
-    /// case. The cursors are borrowed; copy out only what you need
-    /// before the closure returns.
     func describeToken(at offset: TextSize) -> String {
         tree.withRoot { root in
             root.withTokenAtOffset(
@@ -35,10 +21,6 @@ public extension CalculatorParseResult {
         }
     }
 
-    /// What is the smallest node or token wholly covering `range`?
-    /// `withCoveringElement` walks down the tree and stops at the
-    /// element whose own range contains `range` but none of whose
-    /// children do.
     func describeCovering(_ range: TextRange) -> String? {
         tree.withRoot { root in
             root.withCoveringElement(range) { element in
@@ -52,12 +34,6 @@ public extension CalculatorParseResult {
         }
     }
 
-    /// Whether the source bytes contain `needle` as a UTF-8 substring.
-    /// Streams the document via ``CambiumCore/SyntaxText`` — only
-    /// `needle.utf8` is materialized as an `Array`, the document
-    /// itself is never copied.
-    ///
-    /// Per `SyntaxText`'s contract an empty needle returns `true`.
     func sourceContains(_ needle: String) -> Bool {
         let bytes = Array(needle.utf8)
         return tree.withRoot { root in
@@ -67,9 +43,6 @@ public extension CalculatorParseResult {
         }
     }
 
-    /// First byte-range matching `needle` in source order.
-    /// `firstRange(of:)` runs a KMP-style scan over the chunk-by-chunk
-    /// view that `SyntaxText` exposes — no per-chunk allocation.
     func sourceFirstRange(of needle: String) -> TextRange? {
         let bytes = Array(needle.utf8)
         return tree.withRoot { root in

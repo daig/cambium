@@ -1,5 +1,3 @@
-// CalculatorParser.swift
-
 import Cambium
 
 struct CalculatorParser: ~Copyable {
@@ -28,15 +26,6 @@ struct CalculatorParser: ~Copyable {
         return result.snapshot.makeSyntaxTree()
     }
 
-    /// Pratt-style precedence climbing.
-    ///
-    /// 1. Record the builder position with `checkpoint()` *before*
-    ///    parsing the left-hand side.
-    /// 2. Parse the prefix.
-    /// 3. While the next token is a binary operator whose precedence
-    ///    meets `minPrecedence`, retroactively wrap everything since
-    ///    the checkpoint inside a `binaryExpr` and recurse for the
-    ///    right operand at higher precedence.
     private mutating func parseExpression(minPrecedence: Int) throws {
         let checkpoint = builder.checkpoint()
         try parsePrefix()
@@ -50,9 +39,6 @@ struct CalculatorParser: ~Copyable {
             }
 
             advance()
-            // `startNode(at:_:)` is the retroactive open: it looks up
-            // the children appended since `checkpoint` and reparents
-            // them under a fresh `binaryExpr` frame.
             try builder.startNode(at: checkpoint, .binaryExpr)
             try parseExpression(minPrecedence: precedence + 1)
             try builder.finishNode()
@@ -112,9 +98,6 @@ struct CalculatorParser: ~Copyable {
 }
 
 private extension LexedToken {
-    /// Map a `LexedToken` back to its `CalculatorKind` so we can read
-    /// `binaryPrecedence`. Returns `nil` for kinds that are not also
-    /// represented in the language enum (only `.eof`).
     var calculatorKind: CalculatorKind? {
         switch kind {
         case .number: .number

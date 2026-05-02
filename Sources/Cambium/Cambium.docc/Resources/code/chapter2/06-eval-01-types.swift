@@ -1,5 +1,3 @@
-// CalculatorValue.swift — domain types the evaluator returns
-
 import Cambium
 
 public enum CalculatorValue: Sendable, Equatable, CustomStringConvertible {

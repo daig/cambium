@@ -1,5 +1,3 @@
-// CalculatorLanguage.swift
-
 import Cambium
 import CambiumSyntaxMacros
 
@@ -29,10 +27,6 @@ public enum CalculatorKind: UInt32, Sendable {
     case error = 199
 }
 
-// `SyntaxLanguage` ties the kind enum into Cambium's generic types. Most
-// requirements have default implementations that work for any
-// `SyntaxKind`-conforming enum, so a fresh language conformance is a few
-// constants plus the kind/trivia classifiers.
 public enum CalculatorLanguage: SyntaxLanguage {
     public typealias Kind = CalculatorKind
 
