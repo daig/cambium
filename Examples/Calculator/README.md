@@ -25,6 +25,9 @@ REPL commands:
   pair at a token boundary.
 - `:cover <start>..<end>` shows the smallest node or token covering a byte
   range.
+- `:nodes` lists owned handles for expression nodes in depth-first preorder.
+- `:tokens [<start>..<end>]` lists owned token handles, optionally filtered to
+  a byte range.
 - `:show` prints the current document and re-evaluates it.
 - `:save <path>` writes the current clean tree as a Cambium green snapshot.
 - `:load <path>` loads a Cambium green snapshot as the current document.
@@ -58,6 +61,27 @@ calc> (1
 error: expected ')' at 2..<2
 calc> :at 2
 single: rightParen 2..<2 ""
+```
+
+## Owned Traversal
+
+Most calculator internals use borrowed cursors because they avoid allocation
+and ARC traffic on hot paths. The `:nodes` and `:tokens` commands instead use
+`CalculatorParseResult.expressionHandles` and `tokenHandles(in:)`, which
+materialize arrays of `SyntaxNodeHandle` and `SyntaxTokenHandle` values that can
+be iterated or stored after the original borrow scope has ended.
+
+```text
+calc> 1 + round(2.5)
+4
+calc> :nodes
+binaryExpr 0..<14 "1 + round(2.5)"
+integerExpr 0..<1 "1"
+roundCallExpr 4..<14 "round(2.5)"
+realExpr 10..<13 "2.5"
+calc> :tokens 4..<10
+round 4..<9 "round"
+( 9..<10 "("
 ```
 
 ## Analysis Sidecars

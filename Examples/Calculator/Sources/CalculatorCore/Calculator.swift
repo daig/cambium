@@ -51,6 +51,26 @@ public struct CalculatorParseResult: Sendable {
     }
 }
 
+public extension CalculatorParseResult {
+    /// Every expression-shape node in the tree, in depth-first preorder.
+    ///
+    /// This intentionally returns owned handles so callers can iterate,
+    /// store, or pass node references outside Cambium's borrowed cursor
+    /// closures. For hot-path analysis, prefer borrowed traversal.
+    var expressionHandles: [SyntaxNodeHandle<CalculatorLanguage>] {
+        tree.rootAndDescendantHandlesPreorder.filter { handle in
+            CalculatorLanguage.kind(for: handle.rawKind).isExpressionNode
+        }
+    }
+
+    /// Every token in the tree, optionally filtered to a byte range.
+    func tokenHandles(
+        in range: TextRange? = nil
+    ) -> [SyntaxTokenHandle<CalculatorLanguage>] {
+        tree.rootHandle().tokenHandles(in: range)
+    }
+}
+
 public struct FoldReport: Sendable {
     public let steps: [FoldStep]
     public let finalTree: SharedSyntaxTree<CalculatorLanguage>

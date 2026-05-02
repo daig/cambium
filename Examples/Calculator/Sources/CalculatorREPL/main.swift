@@ -51,6 +51,12 @@ struct CalculatorREPL {
                     )
                 }
                 continue
+            case ":nodes":
+                printExpressionHandles(in: lastResult)
+                continue
+            case ":tokens":
+                printTokenHandles(nil, in: lastResult)
+                continue
             case ":fold":
                 if document.isEmpty {
                     print("error: no current document")
@@ -177,6 +183,12 @@ struct CalculatorREPL {
                 continue
             }
 
+            if trimmed.hasPrefix(":tokens ") {
+                let body = String(trimmed.dropFirst(":tokens ".count))
+                printTokenHandles(body, in: lastResult)
+                continue
+            }
+
             if trimmed.hasPrefix(":edit ") {
                 let body = String(trimmed.dropFirst(":edit ".count))
                 guard let parsed = parseEditCommand(body) else {
@@ -231,6 +243,8 @@ struct CalculatorREPL {
           :edit <start>..<end> <text> apply a byte-range edit and reparse
           :at <offset>                show token ownership at a byte offset
           :cover <start>..<end>       show smallest element covering a byte range
+          :nodes                      list expression node handles
+          :tokens [<start>..<end>]    list token handles, optionally in a byte range
           :show                       show current document and re-evaluate
           :save <path>                write current clean tree snapshot
           :load <path>                load a tree snapshot as the document
@@ -375,6 +389,74 @@ struct CalculatorREPL {
         print(result ?? "(no element covers \(format(range)))")
     }
 
+    private static func printExpressionHandles(
+        in lastResult: CalculatorParseResult?
+    ) {
+        guard let lastResult else {
+            print("(no document parsed yet)")
+            return
+        }
+
+        let handles = lastResult.expressionHandles
+        guard !handles.isEmpty else {
+            print("(no expression nodes)")
+            return
+        }
+
+        for handle in handles {
+            handle.withCursor { node in
+                print(
+                    "\(CalculatorLanguage.name(for: node.kind)) \(format(node.textRange)) \"\(escaped(node.makeString()))\""
+                )
+            }
+        }
+    }
+
+    private static func printTokenHandles(
+        _ body: String?,
+        in lastResult: CalculatorParseResult?
+    ) {
+        guard let lastResult else {
+            print("(no document parsed yet)")
+            return
+        }
+
+        let range: Cambium.TextRange?
+        if let body {
+            let rangeText = body.trimmingCharacters(in: .whitespaces)
+            guard !rangeText.isEmpty,
+                  let byteRange = parseByteRange(rangeText)
+            else {
+                print("error: usage is :tokens [<start>..<end>]")
+                return
+            }
+            range = Cambium.TextRange(
+                start: TextSize(UInt32(byteRange.start)),
+                end: TextSize(UInt32(byteRange.end))
+            )
+        } else {
+            range = nil
+        }
+
+        let handles = lastResult.tokenHandles(in: range)
+        guard !handles.isEmpty else {
+            if let range {
+                print("(no tokens in \(format(range)))")
+            } else {
+                print("(no tokens)")
+            }
+            return
+        }
+
+        for handle in handles {
+            handle.withCursor { token in
+                print(
+                    "\(tokenDisplayName(for: token.kind)) \(format(token.textRange)) \"\(escaped(token.makeString()))\""
+                )
+            }
+        }
+    }
+
     private static func describeElement(
         _ element: borrowing SyntaxElementCursor<CalculatorLanguage>
     ) -> String {
@@ -396,6 +478,15 @@ struct CalculatorREPL {
         _ token: borrowing SyntaxTokenCursor<CalculatorLanguage>
     ) -> String {
         "\(CalculatorLanguage.name(for: token.kind)) \(format(token.textRange))"
+    }
+
+    private static func tokenDisplayName(for kind: CalculatorKind) -> String {
+        if let text = CalculatorLanguage.staticText(for: kind) {
+            return text.withUTF8Buffer { bytes in
+                String(decoding: bytes, as: UTF8.self)
+            }
+        }
+        return CalculatorLanguage.name(for: kind)
     }
 
     private static func foldAndPrint(
