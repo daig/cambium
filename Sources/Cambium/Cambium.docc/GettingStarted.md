@@ -295,13 +295,14 @@ extension Parser {
 }
 ```
 
-The result includes the green ``CambiumBuilder/GreenBuildResult/root``, the immutable
-``CambiumBuilder/GreenBuildResult/tokenText`` resolver, and the underlying
-``CambiumBuilder/GreenNodeCache`` (accessible via
-``CambiumBuilder/GreenBuildResult/intoCache()``). The cache is what lets you preserve
-structural sharing across reparses — pass it to the next builder via
-`GreenTreeBuilder(cache:)` to keep token-key namespace identity
-stable.
+The result includes the green ``CambiumBuilder/GreenBuildResult/root``, the
+``CambiumBuilder/GreenBuildResult/resolver`` (sealed once at `finish()` via the
+interner's ``CambiumCore/TokenInterner/makeResolver()``), and the underlying
+``CambiumBuilder/GreenTreeContext`` (accessible via
+``CambiumBuilder/GreenBuildResult/intoContext()``). The context bundles the
+interner with the cache as a namespace-bound unit; pass it to the next
+builder via ``CambiumBuilder/GreenTreeBuilder/init(context:)`` to keep
+token-key namespace identity stable across reparses.
 
 To work with the syntax tree, materialize a ``CambiumCore/SyntaxTree`` from the
 build result's ``CambiumBuilder/GreenBuildResult/snapshot``:
@@ -399,17 +400,22 @@ attach diagnostics to, or send across actors.
 ## Editing a tree
 
 Trees are persistent. To "edit" one, call
-`SharedSyntaxTree.replacing(_:with:cache:)` with the handle of the
-node to replace and a ``CambiumCore/ResolvedGreenNode`` (or ``CambiumBuilder/GreenTreeSnapshot``,
-or ``CambiumBuilder/GreenBuildResult``) of the replacement. The result is a
-``CambiumCore/ReplacementResult`` with the new tree and a ``CambiumCore/ReplacementWitness``
-describing the structural change:
+`SharedSyntaxTree.replacing(_:with:context:)` with the handle of the
+node to replace and a ``CambiumCore/ResolvedGreenNode`` (or
+``CambiumBuilder/GreenTreeSnapshot``, or ``CambiumBuilder/GreenBuildResult``)
+of the replacement. The result is a ``CambiumCore/ReplacementResult``
+with the new tree and a ``CambiumCore/ReplacementWitness`` describing
+the structural change. The `context:` argument is a
+``CambiumBuilder/GreenTreeContext`` whose interner shares the target
+tree's namespace — pass `result.intoContext()` from the build that
+produced the target tree to keep namespace identity intact.
 
 ```swift
 let original = tree.intoShared()
 
-// Build a replacement subtree.
-var rebuilder = GreenTreeBuilder<Calc>(cache: result.intoCache())
+// Build a replacement subtree, reusing the original's context so the
+// replacement's keys land in the same namespace.
+var rebuilder = GreenTreeBuilder<Calc>(context: result.intoContext())
 rebuilder.startNode(.expr)
 try rebuilder.token(.integer, text: "42")
 try rebuilder.finishNode()
@@ -421,8 +427,8 @@ let target: SyntaxNodeHandle<Calc> = original.withRoot { root in
     root.withFirstChild { $0.makeHandle() }!
 }
 
-var cache = replacement.intoCache()
-let edit = try original.replacing(target, with: replacementSnapshot, cache: &cache)
+var context = replacement.intoContext()
+let edit = try original.replacing(target, with: replacementSnapshot, context: &context)
 let witness = edit.witness
 let next = edit.intoTree()
 ```

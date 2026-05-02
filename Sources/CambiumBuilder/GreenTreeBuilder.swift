@@ -666,7 +666,14 @@ public struct GreenTreeContext<Lang: SyntaxLanguage>: ~Copyable {
 
     /// The structural-dedup cache. Bound to ``interner``'s namespace by
     /// construction; never mix with a cache from a different context.
-    public var cache: GreenNodeCache<Lang>
+    ///
+    /// Internal access only: external mutation could populate the cache
+    /// with token-text storage referencing keys not minted by this
+    /// context's ``interner``, silently weakening the namespace
+    /// invariant the type is meant to enforce. The builder consumes
+    /// the context (and with it, this cache) through
+    /// ``CambiumBuilder/GreenTreeBuilder/init(context:)``.
+    internal var cache: GreenNodeCache<Lang>
 
     /// Adopt an external interner; mint a fresh cache subject to `policy`.
     public init(interner: any TokenInterner, policy: GreenCachePolicy = .documentLocal) {
@@ -1800,32 +1807,26 @@ public extension SharedSyntaxTree {
 
         if let sourceNamespace = replacement.resolver.tokenKeyNamespace,
            let targetNamespace = resolver.tokenKeyNamespace,
-           sourceNamespace === targetNamespace
+           sourceNamespace === targetNamespace,
+           targetNamespace === context.interner.namespace
         {
-            let newRoot: GreenNode<Lang>
-            let resultResolver: any TokenResolver
-            if targetNamespace === context.interner.namespace {
-                newRoot = try rebuildReplacingCached(
-                    root: oldRoot,
-                    path: ArraySlice(replacedPath),
-                    replacement: replacement.root,
-                    cache: &context.cache
-                )
-                // Fresh resolver from the context's interner. Required for
-                // correctness when the interner has grown beyond this tree's
-                // resolver snapshot (e.g., another builder using the same
-                // interner minted keys after this tree finished). The new
-                // resolver shares the context interner's namespace, so
-                // namespace-identity continuity is preserved.
-                resultResolver = context.interner.makeResolver()
-            } else {
-                newRoot = try rebuildReplacingDirect(
-                    root: oldRoot,
-                    path: ArraySlice(replacedPath),
-                    replacement: replacement.root
-                )
-                resultResolver = resolver
-            }
+            // All three (source, target, context-interner) share one
+            // namespace: the replacement's keys are valid in the cache
+            // and the result tree can carry a fresh resolver from the
+            // context's interner. This is the happy path.
+            let newRoot = try rebuildReplacingCached(
+                root: oldRoot,
+                path: ArraySlice(replacedPath),
+                replacement: replacement.root,
+                cache: &context.cache
+            )
+            // Fresh resolver from the context's interner. Required for
+            // correctness when the interner has grown beyond this tree's
+            // resolver snapshot (e.g., another builder using the same
+            // interner minted keys after this tree finished). The new
+            // resolver shares the context interner's namespace, so
+            // namespace-identity continuity is preserved.
+            let resultResolver = context.interner.makeResolver()
             let witness = ReplacementWitness(
                 oldRoot: oldRoot,
                 newRoot: newRoot,
@@ -1838,6 +1839,16 @@ public extension SharedSyntaxTree {
                 witness: witness
             )
         }
+        // Note: when sourceNamespace === targetNamespace but the
+        // context's interner is in a different namespace, we deliberately
+        // fall through. The previous version of this branch reused the
+        // target tree's old `resolver` after a direct rebuild, which
+        // could leave the new tree referencing keys minted in the
+        // shared namespace after the target's resolver was sealed —
+        // rendering would precondition-fail. The fall-through routes
+        // such cases to tier 3 (cache-remap into the context interner)
+        // or tier 5 (overlay fallback), both of which produce a tree
+        // with a resolver guaranteed to cover every key it references.
 
         if let targetNamespace = resolver.tokenKeyNamespace,
            targetNamespace === context.interner.namespace

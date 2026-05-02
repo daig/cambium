@@ -193,8 +193,57 @@ import Testing
 }
 
 @Test func sameNamespaceReplacementKeepsTargetResolverNamespace() throws {
+    // Build the target tree inline so we can capture its context. The
+    // replacement and the target share a namespace (replacement is a
+    // resolved green node from the target itself), and we pass the
+    // target's own context — all three namespaces match, so the
+    // result tree's resolver carries the same namespace and the
+    // newSubtree splices in directly.
+    var builder = GreenTreeBuilder<TestLanguage>()
+    builder.startNode(.root)
+    builder.startNode(.list)
+    try builder.token(.identifier, text: "keep")
+    try builder.finishNode()
+    builder.startNode(.list)
+    try builder.token(.identifier, text: "old")
+    try builder.finishNode()
+    try builder.finishNode()
+    let buildResult = try builder.finish()
+    let originalNamespace = buildResult.resolver.tokenKeyNamespace
+    let shared = buildResult.snapshot.makeSyntaxTree().share()
+    var context = buildResult.intoContext()
+
+    let replacement = shared.withRoot { root in
+        root.withChildNode(at: 0) { child in
+            child.resolvedGreenNode()
+        }!
+    }
+    let handleToChild1 = shared.withRoot { root in
+        root.withChildNode(at: 1) { $0.makeHandle() }!
+    }
+
+    let result = try shared.replacing(handleToChild1, with: replacement, context: &context)
+    let witness = result.witness
+    let newTree = result.intoTree()
+
+    #expect(originalNamespace != nil)
+    #expect(newTree.resolver.tokenKeyNamespace === originalNamespace)
+    #expect(witness.newSubtree.identity == replacement.root.identity)
+    #expect(newTree.withRoot { $0.makeString() } == "keepkeep")
+}
+
+@Test func sameNamespaceReplacementWithMismatchedContextFallsThroughToOverlay() throws {
+    // Replacement and target share a namespace (replacement is a
+    // resolved green node from the target), but the context is fresh
+    // with a different interner namespace. The previous tier-2 else
+    // branch optimistically reused the target's old resolver, which
+    // could leave the result tree referencing keys minted in the
+    // shared namespace after the target's resolver was sealed —
+    // rendering would precondition-fail. The fix routes such cases
+    // to the overlay fallback (tier 5), which produces a correct
+    // result tree at the cost of an overlay-keyed resolver (no
+    // namespace).
     let shared = try makeTwoListRoot().share()
-    let originalNamespace = shared.resolver.tokenKeyNamespace
     let replacement = shared.withRoot { root in
         root.withChildNode(at: 0) { child in
             child.resolvedGreenNode()
@@ -206,13 +255,15 @@ import Testing
 
     var context = GreenTreeContext<TestLanguage>()
     let result = try shared.replacing(handleToChild1, with: replacement, context: &context)
-    let witness = result.witness
     let newTree = result.intoTree()
 
-    #expect(originalNamespace != nil)
-    #expect(newTree.resolver.tokenKeyNamespace === originalNamespace)
-    #expect(witness.newSubtree.identity == replacement.root.identity)
+    // Text rendering is correct end-to-end (the whole point of the
+    // overlay fallback).
     #expect(newTree.withRoot { $0.makeString() } == "keepkeep")
+    // The result resolver intentionally exposes no namespace because
+    // it composes overlay-only synthetic keys with the target's base
+    // resolver.
+    #expect(newTree.resolver.tokenKeyNamespace == nil)
 }
 
 @Test func replacementBySelfResolvedNodePreservesRootIdentity() throws {
